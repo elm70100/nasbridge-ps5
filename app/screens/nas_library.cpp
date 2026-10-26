@@ -367,6 +367,11 @@ bool is_cover_name(const std::string &name)
     return low.compare(0, 5, "icon0") == 0 && ends_with_nocase(low, ".png");
 }
 
+bool is_pkg(const std::string &name)
+{
+    return ends_with_nocase(name, ".pkg");
+}
+
 const NasGame *find_saved(const std::vector<NasGame> &saved, const std::string &entry)
 {
     for (const NasGame &game : saved)
@@ -885,7 +890,7 @@ struct LibraryLoader::Job
         }
         std::vector<const DavEntry *> candidates;
         for (const DavEntry &entry : entries)
-            if (entry.folder || ends_with_nocase(entry.name, ".exfat"))
+            if (entry.folder || ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
                 candidates.push_back(&entry);
 
         // 3. Each game: unchanged ones come from the cache, the rest are read.
@@ -939,11 +944,19 @@ struct LibraryLoader::Job
                 game.title = entry.folder ? entry.name : without_extension(entry.name);
                 if (!entry.folder)
                 {
-                    game.image = true;
-                    game.image_path = entry.name;
                     game.size = entry.size;
                     game.size_known = true;
                     game.stamp = stamp_of(entry);
+                    if (is_pkg(entry.name))
+                    {
+                        game.image = false;
+                        game.note = "PKG package file. NASBridge can list it, but cannot install it.";
+                    }
+                    else
+                    {
+                        game.image = true;
+                        game.image_path = entry.name;
+                    }
                 }
                 else if (!read_folder(root, &game))
                 {
