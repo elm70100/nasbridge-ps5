@@ -1,0 +1,35 @@
+
+name: Build NASBridge PKG
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Apply PKG patch
+        run: |
+          git apply --check nasbridge-pkg-catalogue.patch
+          git apply nasbridge-pkg-catalogue.patch
+
+      - name: Run tests
+        run: make test
+
+      - name: Compile ELF
+        run: make release
+
+      - name: Upload ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: NASBridge-PKG-modified
+          path: out/NASBridge-*.elf
+          if-no-files-found: error
