@@ -1,0 +1,155 @@
+--- a/app/screens/nas_library.cpp
++++ b/app/screens/nas_library.cpp
+@@ -365,6 +365,13 @@
+ {
+     const std::string low = lowered(name);
+     return low.compare(0, 5, "icon0") == 0 && ends_with_nocase(low, ".png");
++}
++
++// A .pkg is a package file, not a mounted exFAT image or a game folder.
++// NASBridge can catalogue it, but does not install package files itself.
++bool is_pkg(const std::string &name)
++{
++    return ends_with_nocase(name, ".pkg");
+ }
+ 
+ const NasGame *find_saved(const std::vector<NasGame> &saved, const std::string &entry)
+@@ -885,7 +892,7 @@
+         }
+         std::vector<const DavEntry *> candidates;
+         for (const DavEntry &entry : entries)
+-            if (entry.folder || ends_with_nocase(entry.name, ".exfat"))
++            if (entry.folder || ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
+                 candidates.push_back(&entry);
+ 
+         // 3. Each game: unchanged ones come from the cache, the rest are read.
+@@ -939,11 +946,21 @@
+                 game.title = entry.folder ? entry.name : without_extension(entry.name);
+                 if (!entry.folder)
+                 {
+-                    game.image = true;
+-                    game.image_path = entry.name;
+                     game.size = entry.size;
+                     game.size_known = true;
+                     game.stamp = stamp_of(entry);
++                    if (is_pkg(entry.name))
++                    {
++                        // List the package, but do not treat it as an exFAT
++                        // image: NASBridge has no package installer.
++                        game.image = false;
++                        game.note = "PKG package file. NASBridge can list it, but cannot install it.";
++                    }
++                    else
++                    {
++                        game.image = true;
++                        game.image_path = entry.name;
++                    }
+                 }
+                 else if (!read_folder(root, &game))
+                 {
+--- a/app/screens/library.cpp
++++ b/app/screens/library.cpp
+@@ -147,6 +147,17 @@
+         line += text;
+     }
+     return line;
++}
++
++bool is_pkg_entry(const std::string &entry)
++{
++    if (entry.size() < 4)
++        return false;
++    const std::size_t n = entry.size();
++    return entry[n - 4] == '.' &&
++           (entry[n - 3] == 'p' || entry[n - 3] == 'P') &&
++           (entry[n - 2] == 'k' || entry[n - 2] == 'K') &&
++           (entry[n - 1] == 'g' || entry[n - 1] == 'G');
+ }
+ 
+ // One game in the library, from the NAS or (PC preview) the demo catalogue.
+@@ -887,7 +898,8 @@
+     {
+         Game game;
+         game.title = found.title;
+-        game.format = found.image ? "exFAT image" : "Game folder";
++        game.format = is_pkg_entry(found.entry) ? "PKG package" :
++                      (found.image ? "exFAT image" : "Game folder");
+         game.label = game.format;
+         game.title_id = found.title_id;
+         game.version = found.version;
+@@ -1318,6 +1330,11 @@
+             queue_.waiting(game.source.entry) != nullptr)
+         {
+             out[0] = {"Copied", Command::none, false, false};
++            return 1;
++        }
++        if (is_pkg_entry(game.source.entry))
++        {
++            out[0] = {"PKG file · install separately", Command::none, false, false};
+             return 1;
+         }
+         const CopyCheck check = copy_check(game);
+--- a/tests/test_game_count.cpp
++++ b/tests/test_game_count.cpp
+@@ -67,6 +67,7 @@
+     file(g + "/I/a/b/c/d/sce_sys/param.json", kParam);   // four: as deep as is searched
+     file(g + "/J/a/b/c/d/e/sce_sys/param.json", kParam); // deeper: not found
+     file(g + "/notes.txt");                              // a file: not a game
++    file(g + "/PS4_Game.pkg", "package");                 // catalogued package file
+     const std::string control = work + "/control.json";
+     file(control, "{}");
+ 
+@@ -124,6 +125,7 @@
+     loader.start(connection, {});
+     int folders = 0;
+     int images = 0;
++    int packages = 0;
+     bool listed = false;
+     for (int i = 0; i < 400 && !listed; ++i)
+     {
+@@ -134,15 +136,22 @@
+             {
+                 listed = true;
+                 for (const NasGame &game : event.games)
+-                    (game.image ? images : folders) += 1;
++                {
++                    if (game.entry.size() >= 4 &&
++                        game.entry.compare(game.entry.size() - 4, 4, ".pkg") == 0)
++                        ++packages;
++                    else
++                        (game.image ? images : folders) += 1;
++                }
+             }
+         }
+         sleep_ms(25);
+     }
+     loader.stop();
+-    check(listed && folders == count.folder_games && images == count.image_games,
+-          "the library finds the same games",
+-          std::to_string(folders) + " folder, " + std::to_string(images) + " image");
++    check(listed && folders == count.folder_games && images == count.image_games && packages == 1,
++          "the library finds games and catalogues PKG files",
++          std::to_string(folders) + " folder, " + std::to_string(images) + " image, " +
++              std::to_string(packages) + " package");
+ 
+     // The whole test through NasProbe: quick (at launch) and counting.
+     NasProbe probe;
+--- a/README.md
++++ b/README.md
+@@ -16,6 +16,8 @@
+   their names, covers and
+   sizes, read from each game's `sce_sys` folder. Game folders are found up to
+   four folders down, and `.exfat` images are read without downloading them.
++  Top-level `.pkg` files are also listed by filename and size; NASBridge does
++  not install `.pkg` packages.
+ - **Copies games to the PS5.** Queue as many as you like. The queue can be
+   reordered, paused and resumed, and it picks up where it left off if
+   NASBridge or the PS5 restarts. Free space is checked before each game.
+@@ -124,6 +126,7 @@
+ | A game folder | `Games/Astro Bot/sce_sys/...` |
+ | A game folder nested inside others (up to 4 levels) | `Games/Astro Bot/dump/PPSA01234-app/sce_sys/...` |
+ | An `.exfat` image, on its own or in a folder | `Games/Astro Bot.exfat` |
++| A `.pkg` package file (catalogue only) | `Games/PS4_Game.pkg` |
+ 
+ NASBridge only reads from your NAS. It never changes or deletes anything there.
+ 
