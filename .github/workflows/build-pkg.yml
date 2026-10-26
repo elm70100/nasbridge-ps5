@@ -16,11 +16,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Apply PKG patch
-        run: |
-          git apply --check nasbridge-pkg-catalogue.patch
-          git apply nasbridge-pkg-catalogue.patch
-
       - name: Run tests
         run: make test
 
