@@ -149,6 +149,15 @@ std::string copy_progress(const QueueEntry &item, double rate)
     return line;
 }
 
+bool is_pkg_entry(const std::string &entry)
+{
+    if (entry.size() < 4) return false;
+    const std::size_t n = entry.size();
+    return entry[n-4] == '.' && (entry[n-3] == 'p' || entry[n-3] == 'P') &&
+           (entry[n-2] == 'k' || entry[n-2] == 'K') &&
+           (entry[n-1] == 'g' || entry[n-1] == 'G');
+}
+
 // One game in the library, from the NAS or (PC preview) the demo catalogue.
 struct Game
 {
@@ -887,7 +896,8 @@ class Library final : public app::Concept
     {
         Game game;
         game.title = found.title;
-        game.format = found.image ? "exFAT image" : "Game folder";
+        game.format = is_pkg_entry(found.entry) ? "PKG package" :
+                      (found.image ? "exFAT image" : "Game folder");
         game.label = game.format;
         game.title_id = found.title_id;
         game.version = found.version;
@@ -1318,6 +1328,11 @@ class Library final : public app::Concept
             queue_.waiting(game.source.entry) != nullptr)
         {
             out[0] = {"Copied", Command::none, false, false};
+            return 1;
+        }
+        if (is_pkg_entry(game.source.entry))
+        {
+            out[0] = {"PKG file · install separately", Command::none, false, false};
             return 1;
         }
         const CopyCheck check = copy_check(game);
