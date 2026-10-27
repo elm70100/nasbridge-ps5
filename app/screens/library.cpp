@@ -1980,17 +1980,32 @@ class Library final : public app::Concept
         }
         else
         {
-            // No cover: the card's own gradient, with the title's first letter.
+            // No cover: use a title monogram rather than a single generic letter.
+            // This keeps packages distinguishable until artwork is available.
             list.gradient_rect(cover, radius, game.mid, game.dark);
-            // The first letter or digit ("[PPSA01234] Game" gives "P").
-            std::string initial = "?";
+            std::string initials;
+            bool next_word = true;
             for (const char c : game.title)
-                if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+            {
+                const bool alnum = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                                   (c >= '0' && c <= '9');
+                if (!alnum)
                 {
-                    initial.assign(1, c >= 'a' && c <= 'z' ? static_cast<char>(c - 32) : c);
-                    break;
+                    next_word = true;
+                    continue;
                 }
-            paint.heading(initial, cover.cx(), cover.cy() + cover.h * 0.12f, cover.h * 0.36f,
+                if (next_word && initials.size() < 2)
+                {
+                    initials += c >= 'a' && c <= 'z' ? static_cast<char>(c - 32) : c;
+                    next_word = false;
+                }
+                else if (initials.empty())
+                    initials += c >= 'a' && c <= 'z' ? static_cast<char>(c - 32) : c;
+            }
+            if (initials.empty())
+                initials = "?";
+            paint.heading(initials, cover.cx(), cover.cy() + cover.h * 0.12f,
+                          cover.h * (initials.size() > 1 ? 0.28f : 0.36f),
                           kWhite.with_alpha(0.85f), gfx::Align::center);
         }
         list.bordered_rect(cover, radius, Color::rgb(0x000000, 0.0f), 1.5f,
