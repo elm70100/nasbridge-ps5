@@ -904,7 +904,14 @@ class Library final : public app::Concept
         game.size_gb = found.size_known ? static_cast<double>(found.size) / 1e9 : 0.0;
         const std::string root = connection_.connection().folder;
         game.blurb = (root == "/" ? "" : root) + "/" + found.entry + " on your NAS";
-        game.note = found.note;
+        if (is_pkg_entry(found.entry))
+        {
+            // Listing a PKG is not the same as validating its internal header
+            // or verifying its signature. Keep that distinction explicit.
+            game.note = found.note.empty() ? "not validated; install is unavailable" : found.note;
+        }
+        else
+            game.note = found.note;
         game.from_nas = true;
         game.source = found;
         return game;
@@ -1950,9 +1957,13 @@ class Library final : public app::Concept
         paint.body(ui::fit_label(paint, game.blurb, 24.0f, 1080.0f), kMargin, blurb_y, 24,
                    kWhite.with_alpha(0.62f));
         if (!game.note.empty())
-            paint.body(ui::fit_label(paint, "Couldn't read this game's details: " + game.note,
-                                     22.0f, 1080.0f),
-                       kMargin, blurb_y + 40.0f, 22, theme.danger);
+        {
+            const bool pkg = game.from_nas && is_pkg_entry(game.source.entry);
+            const std::string note = pkg ? "PKG validation: " + game.note
+                                         : "Couldn't read this game's details: " + game.note;
+            paint.body(ui::fit_label(paint, note, 22.0f, 1080.0f),
+                       kMargin, blurb_y + 40.0f, 22, pkg ? theme.primary : theme.danger);
+        }
         list.pop_transform();
         list.pop_opacity();
 
