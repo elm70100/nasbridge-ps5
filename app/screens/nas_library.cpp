@@ -722,6 +722,143 @@ struct LibraryLoader::Job
         game->art_saved = save_picture(art_path(game->entry), art);
     }
 
+    // Reads the PKG directory table over SMB/WebDAV and extracts icon0.png
+    // without downloading the package itself.
+    bool fetch_pkg_cover(const std::string &root, const DavEntry &entry,
+                         NasGame *game, std::string *cover)
+    {
+        const std::string path = root + entry.name;
+        auto be32 = [](const std::uint8_t *p) -> std::uint32_t {
+            return (static_cast<std::uint32_t>(p[0]) << 24) |
+                   (static_cast<std::uint32_t>(p[1]) << 16) |
+                   (static_cast<std::uint32_t>(p[2]) << 8) | p[3];
+        };
+        auto le64 = [](const std::uint8_t *p) -> std::uint64_t {
+            std::uint64_t v = 0;
+            for (int i = 0; i < 8; ++i) v |= static_cast<std::uint64_t>(p[i]) << (i * 8);
+            return v;
+        };
+        auto read = [&](std::uint64_t offset, std::size_t length, std::string *out) {
+            std::string why;
+            return offset <= entry.size && length <= entry.size - offset &&
+                   nas->read_range(path, offset, length, out, &why) && out->size() == length;
+        };
+
+        std::string header;
+        if (!read(0, 0x200, &header)) {
+            game->note = "PKG header could not be read";
+            return false;
+        }
+        const auto *h = reinterpret_cast<const std::uint8_t *>(header.data());
+        std::uint64_t cnt = 0;
+        if (std::memcmp(h, "\x7f" "CNT", 4) == 0) {
+            cnt = 0;
+        } else if (std::memcmp(h, "\x7f" "LIH", 4) == 0) {
+            cnt = le64(h + 0x30);
+        } else if (std::memcmp(h, "\x7f" "FIH", 4) == 0) {
+            cnt = le64(h + 0x58);
+            std::string magic;
+            if (cnt < 0x80 || !read(cnt, 4, &magic) || magic.compare(0, 4, "\x7f" "CNT", 4) != 0) {
+                cnt = 0;
+                for (std::size_t at = 0x10; at + 8 <= header.size(); at += 8) {
+                    const std::uint64_t candidate = le64(h + at);
+                    if (candidate < 0x10000 || candidate >= entry.size || (candidate & 0xfff))
+                        continue;
+                    if (read(candidate, 4, &magic) && magic.compare(0, 4, "\x7f" "CNT", 4) == 0) {
+                        cnt = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        if (cnt >= entry.size || entry.size - cnt < 0x80) {
+            game->note = "unsupported or invalid PKG header (CNT not found)";
+            return false;
+        }
+
+        std::string ch;
+        if (!read(cnt, 0x80, &ch) || ch.compare(0, 4, "\x7f" "CNT", 4) != 0) {
+            game->note = "invalid PKG content header";
+            return false;
+        }
+        const auto *c = reinterpret_cast<const std::uint8_t *>(ch.data());
+        const std::uint32_t count = be32(c + 0x10);
+        const std::uint32_t table_off = be32(c + 0x18);
+        if (!count || count > 2048 || table_off > 0x200000 ||
+            static_cast<std::uint64_t>(count) * 32 > entry.size - cnt ||
+            table_off > entry.size - cnt - static_cast<std::uint64_t>(count) * 32) {
+            game->note = "invalid PKG entry table";
+            return false;
+        }
+        const std::size_t table_size = static_cast<std::size_t>(count) * 32;
+        std::string table;
+        if (!read(cnt + table_off, table_size, &table)) {
+            game->note = "PKG entry table could not be read";
+            return false;
+        }
+        const auto *t = reinterpret_cast<const std::uint8_t *>(table.data());
+        std::uint32_t strings_off = 0, strings_size = 0;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto *e = t + static_cast<std::size_t>(i) * 32;
+            if (be32(e) == 0x0200) {
+                strings_off = be32(e + 16);
+                strings_size = be32(e + 20);
+                break;
+            }
+        }
+        std::string strings;
+        if (strings_size && strings_size < 65536 &&
+            read(cnt + strings_off, strings_size, &strings)) {
+            // Names in the PKG string table are NUL-terminated.
+        } else {
+            strings.clear();
+        }
+
+        std::uint64_t icon_off = 0;
+        std::uint32_t icon_size = 0;
+        std::uint64_t param_off = 0;
+        std::uint32_t param_size = 0;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto *e = t + static_cast<std::size_t>(i) * 32;
+            const std::uint32_t type = be32(e);
+            const std::uint32_t name_off = be32(e + 4);
+            const std::uint32_t data_off = be32(e + 16);
+            const std::uint32_t data_size = be32(e + 20);
+            std::string name;
+            if (name_off < strings.size()) {
+                const std::size_t end = strings.find('\0', name_off);
+                if (end != std::string::npos) name = strings.substr(name_off, end - name_off);
+            }
+            if ((type == 0x2000 || name == "param.json") &&
+                data_size > 0 && data_size < kMaxParam) {
+                param_off = cnt + data_off;
+                param_size = data_size;
+            }
+            if ((type == 0x1200 || name == "icon0.png") &&
+                data_size > 8 && data_size <= kMaxIcon &&
+                cnt + data_off <= entry.size && data_size <= entry.size - (cnt + data_off)) {
+                icon_off = cnt + data_off;
+                icon_size = data_size;
+            }
+        }
+        if (param_size) {
+            std::string json;
+            if (read(param_off, param_size, &json))
+                read_param_json(json, game);
+        }
+        if (!icon_size) {
+            game->note = "PKG has no embedded icon0.png";
+            return false;
+        }
+        if (!read(icon_off, icon_size, cover)) {
+            game->note = "PKG icon0.png could not be read";
+            return false;
+        }
+        game->note.clear();
+        game->cover_saved = save_picture(cover_path(game->entry), *cover);
+        return true;
+    }
+
     // Decodes a cover and sends it to the UI.
     void show_cover(const std::string &entry, const std::string &data)
     {
@@ -911,7 +1048,8 @@ struct LibraryLoader::Job
             {
                 if (!entry.folder)
                 {
-                    same = before->image && before->stamp == stamp_of(entry);
+                    same = before->stamp == stamp_of(entry) &&
+                           (is_pkg(entry.name) ? !before->image : before->image);
                 }
                 else if (before->image)
                 {
@@ -950,7 +1088,7 @@ struct LibraryLoader::Job
                     if (is_pkg(entry.name))
                     {
                         game.image = false;
-                        game.note = "PKG package file. NASBridge can list it, but cannot install it.";
+                        game.note = "PKG package listed; checking embedded cover.";
                     }
                     else
                     {
@@ -983,15 +1121,28 @@ struct LibraryLoader::Job
             }
             // Pictures: fetched when the game is new or changed, or when the
             // cache lost them.
-            const bool cover_missing = !game.cover_file.name.empty() &&
-                                       (!game.cover_saved || !same || lost.count(game.entry) > 0);
-            const bool art_missing = !game.art_file.name.empty() && (!game.art_saved || !same);
-            if (cover_missing || art_missing)
+            if (is_pkg(entry.name))
             {
-                std::string cover;
-                fetch_pictures(root, &game, &cover);
-                if (!cover.empty())
-                    fresh_covers[game.entry] = std::move(cover);
+                const bool cover_missing = !game.cover_saved || !same || lost.count(game.entry) > 0;
+                if (cover_missing) {
+                    std::string cover;
+                    game.cover_saved = false;
+                    if (fetch_pkg_cover(root, entry, &game, &cover) && !cover.empty())
+                        fresh_covers[game.entry] = std::move(cover);
+                }
+            }
+            else
+            {
+                const bool cover_missing = !game.cover_file.name.empty() &&
+                                           (!game.cover_saved || !same || lost.count(game.entry) > 0);
+                const bool art_missing = !game.art_file.name.empty() && (!game.art_saved || !same);
+                if (cover_missing || art_missing)
+                {
+                    std::string cover;
+                    fetch_pictures(root, &game, &cover);
+                    if (!cover.empty())
+                        fresh_covers[game.entry] = std::move(cover);
+                }
             }
             games.push_back(std::move(game));
         }
