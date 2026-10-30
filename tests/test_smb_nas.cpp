@@ -204,6 +204,7 @@ int main(int argc, char **argv)
     file(g + "/I/a/b/c/d/sce_sys/param.json", kParam);   // four: as deep as is searched
     file(g + "/J/a/b/c/d/e/sce_sys/param.json", kParam); // deeper: not found
     file(g + "/notes.txt");                              // a file: not a game
+    file(g + "/Collection/Deep/Extra.pkg", "PKG");       // PKG nested below the library root
     file(g + "/@eaDir/sce_sys/param.json", kParam);      // NAS-internal: never a game
     const std::string one = g + "/Game One";
     write_file(one + "/sce_sys/param.json", 900, 1);
@@ -289,9 +290,12 @@ int main(int argc, char **argv)
         int folders = 0, images = 0;
         for (const NasGame &game : library.games)
             (game.image ? images : folders) += 1;
-        check(library.listed && folders == 6 && images == 4,
-              "every layout found", std::to_string(folders) + " folder, " +
+        check(library.listed && folders == 7 && images == 4,
+              "every layout found, including a nested PKG", std::to_string(folders) + " folder/package, " +
                                         std::to_string(images) + " image games; " + library.headline);
+        const NasGame *nested_pkg = find(library.games, "Collection/Deep/Extra.pkg");
+        check(nested_pkg != nullptr && nested_pkg->size == 3 && nested_pkg->size_known,
+              "a PKG in a nested folder is found with its relative path and size");
         const NasGame *a = find(library.games, "A");
         check(a != nullptr && a->title == "T" && a->title_id == "PPSA00001" && a->stamp.size() > 0,
               "a game's name and title ID come from param.json");

@@ -727,7 +727,9 @@ struct LibraryLoader::Job
     bool fetch_pkg_cover(const std::string &root, const DavEntry &entry,
                          NasGame *game, std::string *cover)
     {
-        const std::string path = root + entry.name;
+        // entry may live in any subfolder of the configured games root.
+        // NasGame::entry is the path relative to that root, not just the basename.
+        const std::string path = root + game->entry;
         auto be32 = [](const std::uint8_t *p) -> std::uint32_t {
             return (static_cast<std::uint32_t>(p[0]) << 24) |
                    (static_cast<std::uint32_t>(p[1]) << 16) |
@@ -1025,10 +1027,63 @@ struct LibraryLoader::Job
             fail(explain_nas_failure(connection, listing));
             return;
         }
-        std::vector<const DavEntry *> candidates;
+        std::vector<DavEntry> candidates;
+        // Keep game folders, images and packages at the configured root as
+        // before. In addition, walk every visible subfolder and collect PKGs
+        // at any depth (e.g. PS4/Action/Game/update.pkg). Paths are kept
+        // relative to root so cache keys remain unique for equal filenames.
         for (const DavEntry &entry : entries)
             if (entry.folder || ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
-                candidates.push_back(&entry);
+                candidates.push_back(entry);
+
+        struct PendingFolder
+        {
+            std::string path;
+            int depth;
+        };
+        std::deque<PendingFolder> folders;
+        for (const DavEntry &entry : entries)
+            if (entry.folder)
+                folders.push_back({entry.path, 1});
+        constexpr int kPkgWalkDepth = 32;
+        constexpr int kPkgWalkFolders = 20000;
+        int walked = 0;
+        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
+        {
+            const PendingFolder folder = std::move(folders.front());
+            folders.pop_front();
+            if (folder.depth > kPkgWalkDepth)
+                continue;
+            std::vector<DavEntry> inside;
+            if (!list_folder(folder.path + "/", &inside))
+                continue;
+            ++walked;
+            for (const DavEntry &entry : inside)
+            {
+                if (entry.folder)
+                {
+                    folders.push_back({entry.path, folder.depth + 1});
+                    continue;
+                }
+                if (!is_pkg(entry.name))
+                    continue;
+                const std::string prefix = root;
+                if (entry.path.compare(0, prefix.size(), prefix) != 0)
+                    continue; // refuse paths outside the configured library
+                const std::string relative = entry.path.substr(prefix.size());
+                if (relative.empty())
+                    continue;
+                const bool already = std::any_of(candidates.begin(), candidates.end(),
+                    [&](const DavEntry &candidate)
+                    {
+                        return !candidate.folder && candidate.path == entry.path;
+                    });
+                if (!already)
+                    candidates.push_back(entry);
+            }
+        }
+        if (cancelled)
+            return;
 
         // 3. Each game: unchanged ones come from the cache, the rest are read.
         std::vector<NasGame> games;
@@ -1038,9 +1093,13 @@ struct LibraryLoader::Job
         {
             if (cancelled)
                 return;
-            const DavEntry &entry = *candidates[static_cast<std::size_t>(k)];
-            progress(k, total, "Checking " + entry.name);
-            const NasGame *before = find_saved(saved, entry.name);
+            const DavEntry &entry = candidates[static_cast<std::size_t>(k)];
+            const std::string relative_entry =
+                entry.path.compare(0, root.size(), root) == 0
+                    ? entry.path.substr(root.size())
+                    : entry.name;
+            progress(k, total, "Checking " + relative_entry);
+            const NasGame *before = find_saved(saved, relative_entry);
             const std::string folder_stamp = entry.folder ? stamp_of(entry) : "";
             NasGame game;
             bool same = false;
@@ -1078,7 +1137,7 @@ struct LibraryLoader::Job
             }
             else
             {
-                game.entry = entry.name;
+                game.entry = relative_entry;
                 game.title = entry.folder ? entry.name : without_extension(entry.name);
                 if (!entry.folder)
                 {
