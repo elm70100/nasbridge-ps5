@@ -1042,14 +1042,24 @@ struct LibraryLoader::Job
         // WebDAV has no equivalent, so retain the bounded breadth-first walk.
         if (nas->smb())
         {
+            // Keep the recursive SMB walk bounded. Very large shares can
+            // contain tens of thousands of folders; attempting to enumerate
+            // all of them in one pass can exhaust the PS5 app's resources.
+            // A bounded scan still returns every PKG found before the limit.
             int walked = 0;
-            constexpr int kPkgWalkFolders = 50000;
+            constexpr int kPkgWalkFolders = 2500;
+            bool scan_limited = false;
             const bool complete = nas->walk_smb(
                 root,
-                [&](const std::string &, const std::vector<DavEntry> &inside)
+                [&](const std::string &folder, const std::vector<DavEntry> &inside)
                 {
-                    if (cancelled || ++walked > kPkgWalkFolders)
+                    if (cancelled)
                         return false;
+                    if (++walked > kPkgWalkFolders)
+                    {
+                        scan_limited = true;
+                        return false;
+                    }
                     for (const DavEntry &entry : inside)
                     {
                         if (entry.folder || !is_pkg(entry.name))
@@ -1068,6 +1078,9 @@ struct LibraryLoader::Job
                         if (!already)
                             candidates.push_back(entry);
                     }
+                    if ((walked % 25) == 0)
+                        progress(walked, kPkgWalkFolders,
+                                 "Scanning " + folder.substr(root.size()));
                     return true;
                 },
                 &listing);
@@ -1078,6 +1091,9 @@ struct LibraryLoader::Job
                 fail(explain_nas_failure(connection, listing));
                 return;
             }
+            if (scan_limited)
+                progress(kPkgWalkFolders, kPkgWalkFolders,
+                         "Folder limit reached; showing discovered PKG files");
         }
         else
         {
