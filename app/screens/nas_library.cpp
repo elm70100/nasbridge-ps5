@@ -1036,50 +1036,96 @@ struct LibraryLoader::Job
             if (entry.folder || ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
                 candidates.push_back(entry);
 
-        struct PendingFolder
+        // SMB has a batched, multi-sign-in tree walker. Use it instead of
+        // issuing one synchronous directory request at a time: on a NAS with
+        // many subfolders the latter can look like a hung library scan.
+        // WebDAV has no equivalent, so retain the bounded breadth-first walk.
+        if (nas->smb())
         {
-            std::string path;
-            int depth;
-        };
-        std::deque<PendingFolder> folders;
-        for (const DavEntry &entry : entries)
-            if (entry.folder)
-                folders.push_back({entry.path, 1});
-        constexpr int kPkgWalkDepth = 32;
-        constexpr int kPkgWalkFolders = 20000;
-        int walked = 0;
-        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
-        {
-            const PendingFolder folder = std::move(folders.front());
-            folders.pop_front();
-            if (folder.depth > kPkgWalkDepth)
-                continue;
-            std::vector<DavEntry> inside;
-            if (!list_folder(folder.path + "/", &inside))
-                continue;
-            ++walked;
-            for (const DavEntry &entry : inside)
-            {
-                if (entry.folder)
+            int walked = 0;
+            constexpr int kPkgWalkFolders = 50000;
+            const bool complete = nas->walk_smb(
+                root,
+                [&](const std::string &, const std::vector<DavEntry> &inside)
                 {
-                    folders.push_back({entry.path, folder.depth + 1});
-                    continue;
-                }
-                if (!is_pkg(entry.name))
-                    continue;
-                const std::string prefix = root;
-                if (entry.path.compare(0, prefix.size(), prefix) != 0)
-                    continue; // refuse paths outside the configured library
-                const std::string relative = entry.path.substr(prefix.size());
-                if (relative.empty())
-                    continue;
-                const bool already = std::any_of(candidates.begin(), candidates.end(),
-                    [&](const DavEntry &candidate)
+                    if (cancelled || ++walked > kPkgWalkFolders)
+                        return false;
+                    for (const DavEntry &entry : inside)
                     {
-                        return !candidate.folder && candidate.path == entry.path;
-                    });
-                if (!already)
-                    candidates.push_back(entry);
+                        if (entry.folder || !is_pkg(entry.name))
+                            continue;
+                        if (entry.path.compare(0, root.size(), root) != 0)
+                            continue;
+                        const std::string relative = entry.path.substr(root.size());
+                        if (relative.empty())
+                            continue;
+                        const bool already = std::any_of(
+                            candidates.begin(), candidates.end(),
+                            [&](const DavEntry &candidate)
+                            {
+                                return !candidate.folder && candidate.path == entry.path;
+                            });
+                        if (!already)
+                            candidates.push_back(entry);
+                    }
+                    return true;
+                },
+                &listing);
+            if (cancelled)
+                return;
+            if (!complete && listing.smb.kind != SmbFailure::Kind::none)
+            {
+                fail(explain_nas_failure(connection, listing));
+                return;
+            }
+        }
+        else
+        {
+            struct PendingFolder
+            {
+                std::string path;
+                int depth;
+            };
+            std::deque<PendingFolder> folders;
+            for (const DavEntry &entry : entries)
+                if (entry.folder)
+                    folders.push_back({entry.path, 1});
+            constexpr int kPkgWalkDepth = 32;
+            constexpr int kPkgWalkFolders = 20000;
+            int walked = 0;
+            while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
+            {
+                const PendingFolder folder = std::move(folders.front());
+                folders.pop_front();
+                if (folder.depth > kPkgWalkDepth)
+                    continue;
+                std::vector<DavEntry> inside;
+                if (!list_folder(folder.path + "/", &inside))
+                    continue;
+                ++walked;
+                for (const DavEntry &entry : inside)
+                {
+                    if (entry.folder)
+                    {
+                        folders.push_back({entry.path, folder.depth + 1});
+                        continue;
+                    }
+                    if (!is_pkg(entry.name))
+                        continue;
+                    if (entry.path.compare(0, root.size(), root) != 0)
+                        continue;
+                    const std::string relative = entry.path.substr(root.size());
+                    if (relative.empty())
+                        continue;
+                    const bool already = std::any_of(
+                        candidates.begin(), candidates.end(),
+                        [&](const DavEntry &candidate)
+                        {
+                            return !candidate.folder && candidate.path == entry.path;
+                        });
+                    if (!already)
+                        candidates.push_back(entry);
+                }
             }
         }
         if (cancelled)
