@@ -327,7 +327,7 @@ namespace
 {
 
 constexpr int kMaxQueuedPictures = 3; // decoded pictures waiting for the UI, at most
-constexpr int kDepth = 3;             // bounded search below a game folder for sce_sys
+constexpr int kDepth = 4;             // bounded search below a game folder for sce_sys
 constexpr int kListings = 10;         // ... in at most this many listings
 constexpr int kSizeFolders = 500;     // hard cap: don't traverse huge NAS trees for a size
 
