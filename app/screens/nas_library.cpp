@@ -327,9 +327,9 @@ namespace
 {
 
 constexpr int kMaxQueuedPictures = 3; // decoded pictures waiting for the UI, at most
-constexpr int kDepth = 4;             // folders searched below a game folder for sce_sys
-constexpr int kListings = 16;         // ... in at most this many listings
-constexpr int kSizeFolders = 4000;    // folders walked to add up a game folder's size
+constexpr int kDepth = 3;             // bounded search below a game folder for sce_sys
+constexpr int kListings = 10;         // ... in at most this many listings
+constexpr int kSizeFolders = 500;     // hard cap: don't traverse huge NAS trees for a size
 
 // What the NAS says about a file or folder, to notice when it changes.
 std::string stamp_of(const DavEntry &entry)
@@ -1051,12 +1051,17 @@ struct LibraryLoader::Job
         };
         std::deque<PendingFolder> folders;
         for (const DavEntry &entry : entries)
-            if (entry.folder && !entry.name.empty() && entry.name[0] != '.')
+            if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
+                lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
+                lowered(entry.name) != "lost+found")
                 folders.push_back({entry.path, 1});
 
-        constexpr int kPkgWalkDepth = 12;
-        constexpr int kPkgWalkFolders = 1000;
-        constexpr std::size_t kPkgWalkPending = 2000;
+        // Keep the scan responsive on large SMB shares. A bounded walk still
+        // finds packages in ordinary nested layouts without flooding the PS5
+        // with thousands of synchronous directory requests.
+        constexpr int kPkgWalkDepth = 8;
+        constexpr int kPkgWalkFolders = 250;
+        constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
         bool scan_limited = false;
         while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
@@ -1075,8 +1080,9 @@ struct LibraryLoader::Job
             {
                 if (entry.folder)
                 {
-                    if (folder.depth < kPkgWalkDepth &&
-                        !entry.name.empty() && entry.name[0] != '.')
+                    if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
+                        entry.name[0] != '.' && lowered(entry.name) != "@eadir" &&
+                        lowered(entry.name) != "#recycle" && lowered(entry.name) != "lost+found")
                     {
                         if (folders.size() < kPkgWalkPending)
                             folders.push_back({entry.path, folder.depth + 1});
@@ -1101,7 +1107,7 @@ struct LibraryLoader::Job
                 if (!already)
                     candidates.push_back(entry);
             }
-            if ((walked % 25) == 0)
+            if ((walked % 10) == 0)
                 progress(walked, kPkgWalkFolders,
                          "Scanning " + folder.path.substr(root.size()));
         }
