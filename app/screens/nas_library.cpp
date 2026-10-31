@@ -1040,110 +1040,76 @@ struct LibraryLoader::Job
         // issuing one synchronous directory request at a time: on a NAS with
         // many subfolders the latter can look like a hung library scan.
         // WebDAV has no equivalent, so retain the bounded breadth-first walk.
-        if (nas->smb())
+        // Use the same sequential, bounded traversal for SMB and WebDAV.
+        // The parallel SMB walker queued every discovered directory at once;
+        // on large Synology trees this could grow memory use until the PS5
+        // terminated the app. One directory per request keeps memory bounded.
+        struct PendingFolder
         {
-            // Keep the recursive SMB walk bounded. Very large shares can
-            // contain tens of thousands of folders; attempting to enumerate
-            // all of them in one pass can exhaust the PS5 app's resources.
-            // A bounded scan still returns every PKG found before the limit.
-            int walked = 0;
-            constexpr int kPkgWalkFolders = 2500;
-            bool scan_limited = false;
-            const bool complete = nas->walk_smb(
-                root,
-                [&](const std::string &folder, const std::vector<DavEntry> &inside)
-                {
-                    if (cancelled)
-                        return false;
-                    if (++walked > kPkgWalkFolders)
-                    {
-                        scan_limited = true;
-                        return false;
-                    }
-                    for (const DavEntry &entry : inside)
-                    {
-                        if (entry.folder || !is_pkg(entry.name))
-                            continue;
-                        if (entry.path.compare(0, root.size(), root) != 0)
-                            continue;
-                        const std::string relative = entry.path.substr(root.size());
-                        if (relative.empty())
-                            continue;
-                        const bool already = std::any_of(
-                            candidates.begin(), candidates.end(),
-                            [&](const DavEntry &candidate)
-                            {
-                                return !candidate.folder && candidate.path == entry.path;
-                            });
-                        if (!already)
-                            candidates.push_back(entry);
-                    }
-                    if ((walked % 25) == 0)
-                        progress(walked, kPkgWalkFolders,
-                                 "Scanning " + folder.substr(root.size()));
-                    return true;
-                },
-                &listing);
-            if (cancelled)
-                return;
-            if (!complete && listing.smb.kind != SmbFailure::Kind::none)
-            {
-                fail(explain_nas_failure(connection, listing));
-                return;
-            }
-            if (scan_limited)
-                progress(kPkgWalkFolders, kPkgWalkFolders,
-                         "Folder limit reached; showing discovered PKG files");
-        }
-        else
+            std::string path;
+            int depth;
+        };
+        std::deque<PendingFolder> folders;
+        for (const DavEntry &entry : entries)
+            if (entry.folder && !entry.name.empty() && entry.name[0] != '.')
+                folders.push_back({entry.path, 1});
+
+        constexpr int kPkgWalkDepth = 12;
+        constexpr int kPkgWalkFolders = 1000;
+        constexpr std::size_t kPkgWalkPending = 2000;
+        int walked = 0;
+        bool scan_limited = false;
+        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
         {
-            struct PendingFolder
+            const PendingFolder folder = std::move(folders.front());
+            folders.pop_front();
+            if (folder.depth > kPkgWalkDepth)
+                continue;
+
+            std::vector<DavEntry> inside;
+            if (!list_folder(folder.path + "/", &inside))
+                continue;
+            ++walked;
+
+            for (const DavEntry &entry : inside)
             {
-                std::string path;
-                int depth;
-            };
-            std::deque<PendingFolder> folders;
-            for (const DavEntry &entry : entries)
                 if (entry.folder)
-                    folders.push_back({entry.path, 1});
-            constexpr int kPkgWalkDepth = 32;
-            constexpr int kPkgWalkFolders = 20000;
-            int walked = 0;
-            while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
-            {
-                const PendingFolder folder = std::move(folders.front());
-                folders.pop_front();
-                if (folder.depth > kPkgWalkDepth)
-                    continue;
-                std::vector<DavEntry> inside;
-                if (!list_folder(folder.path + "/", &inside))
-                    continue;
-                ++walked;
-                for (const DavEntry &entry : inside)
                 {
-                    if (entry.folder)
+                    if (folder.depth < kPkgWalkDepth &&
+                        !entry.name.empty() && entry.name[0] != '.')
                     {
-                        folders.push_back({entry.path, folder.depth + 1});
-                        continue;
+                        if (folders.size() < kPkgWalkPending)
+                            folders.push_back({entry.path, folder.depth + 1});
+                        else
+                            scan_limited = true;
                     }
-                    if (!is_pkg(entry.name))
-                        continue;
-                    if (entry.path.compare(0, root.size(), root) != 0)
-                        continue;
-                    const std::string relative = entry.path.substr(root.size());
-                    if (relative.empty())
-                        continue;
-                    const bool already = std::any_of(
-                        candidates.begin(), candidates.end(),
-                        [&](const DavEntry &candidate)
-                        {
-                            return !candidate.folder && candidate.path == entry.path;
-                        });
-                    if (!already)
-                        candidates.push_back(entry);
+                    continue;
                 }
+                if (!is_pkg(entry.name))
+                    continue;
+                if (entry.path.compare(0, root.size(), root) != 0)
+                    continue;
+                const std::string relative = entry.path.substr(root.size());
+                if (relative.empty())
+                    continue;
+                const bool already = std::any_of(
+                    candidates.begin(), candidates.end(),
+                    [&](const DavEntry &candidate)
+                    {
+                        return !candidate.folder && candidate.path == entry.path;
+                    });
+                if (!already)
+                    candidates.push_back(entry);
             }
+            if ((walked % 25) == 0)
+                progress(walked, kPkgWalkFolders,
+                         "Scanning " + folder.path.substr(root.size()));
         }
+        if (!folders.empty() || walked >= kPkgWalkFolders)
+            scan_limited = true;
+        if (scan_limited)
+            progress(walked, kPkgWalkFolders,
+                     "Scan limit reached; showing discovered PKG files");
         if (cancelled)
             return;
 
