@@ -1028,106 +1028,24 @@ struct LibraryLoader::Job
             return;
         }
         std::vector<DavEntry> candidates;
-        // Root-level standalone images and PKGs remain candidates. Game
-        // folders are added only when their own listing contains sce_sys;
-        // this avoids treating every wrapper/category directory as a game.
+        // This NAS layout stores each game directly under the selected root.
+        // Let read_folder() validate every root folder; the old recursive
+        // walker stopped after 250 folders and silently omitted the rest.
         for (const DavEntry &entry : entries)
-            if (!entry.folder && (ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name)))
+        {
+            if (entry.folder)
+            {
+                const std::string name = lowered(entry.name);
+                if (entry.name.empty() || entry.name[0] == '.' || name == "@eadir" ||
+                    name == "#recycle" || name == "lost+found")
+                    continue;
                 candidates.push_back(entry);
-
-        // Walk sequentially with strict bounds: the PS5 previously faulted
-        // when the directory budget was raised substantially.
-        struct PendingFolder
-        {
-            DavEntry entry;
-            int depth;
-        };
-        std::deque<PendingFolder> folders;
-        for (const DavEntry &entry : entries)
-            if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
-                lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
-                lowered(entry.name) != "lost+found")
-                folders.push_back({entry, 1});
-
-        constexpr int kPkgWalkDepth = 8;
-        constexpr int kPkgWalkFolders = 250;
-        constexpr std::size_t kPkgWalkPending = 512;
-        int walked = 0;
-        bool scan_limited = false;
-        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
-        {
-            const PendingFolder folder = std::move(folders.front());
-            folders.pop_front();
-            if (folder.depth > kPkgWalkDepth)
-                continue;
-
-            std::vector<DavEntry> inside;
-            if (!list_folder(folder.entry.path + "/", &inside))
-                continue;
-            ++walked;
-            bool has_sce_sys = false;
-
-            for (const DavEntry &entry : inside)
-            {
-                if (entry.folder)
-                {
-                    const std::string child_name = lowered(entry.name);
-                    if (child_name == "sce_sys")
-                    {
-                        has_sce_sys = true;
-                        continue;
-                    }
-                    if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
-                        entry.name[0] != '.' && child_name != "@eadir" &&
-                        child_name != "#recycle" && child_name != "lost+found")
-                    {
-                        if (folders.size() < kPkgWalkPending)
-                            folders.push_back({entry, folder.depth + 1});
-                        else
-                            scan_limited = true;
-                    }
-                    continue;
-                }
-                if (!is_pkg(entry.name))
-                    continue;
-                if (entry.path.compare(0, root.size(), root) != 0)
-                    continue;
-                const std::string relative = entry.path.substr(root.size());
-                if (relative.empty())
-                    continue;
-                const bool already = std::any_of(
-                    candidates.begin(), candidates.end(),
-                    [&](const DavEntry &candidate)
-                    {
-                        return !candidate.folder && candidate.path == entry.path;
-                    });
-                if (!already)
-                    candidates.push_back(entry);
             }
-
-            // A folder containing sce_sys is a game candidate, including
-            // nested layouts such as /PS4/Action/Game/sce_sys.
-            if (has_sce_sys)
+            else if (ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
             {
-                const bool already = std::any_of(
-                    candidates.begin(), candidates.end(),
-                    [&](const DavEntry &candidate)
-                    {
-                        return candidate.folder && candidate.path == folder.entry.path;
-                    });
-                if (!already)
-                    candidates.push_back(folder.entry);
+                candidates.push_back(entry);
             }
-
-            if ((walked % 10) == 0)
-                progress(walked, kPkgWalkFolders,
-                         "Scanning " + folder.entry.path.substr(root.size()));
         }
-        if (!folders.empty() || walked >= kPkgWalkFolders)
-            scan_limited = true;
-        if (scan_limited)
-            progress(walked, kPkgWalkFolders,
-                     "Scan limit reached; showing discovered PKG files");
         if (cancelled)
             return;
 
