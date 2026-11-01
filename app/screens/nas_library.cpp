@@ -1028,9 +1028,9 @@ struct LibraryLoader::Job
             return;
         }
         std::vector<DavEntry> candidates;
-        // This NAS layout stores each game directly under the selected root.
-        // Let read_folder() validate every root folder; the old recursive
-        // walker stopped after 250 folders and silently omitted the rest.
+        // All direct child folders are candidates: read_folder() validates
+        // whether each one is a game. Keep a bounded walk for nested PKGs,
+        // which may live below collection/wrapper folders.
         for (const DavEntry &entry : entries)
         {
             if (entry.folder)
@@ -1045,6 +1045,62 @@ struct LibraryLoader::Job
             {
                 candidates.push_back(entry);
             }
+        }
+
+        struct PendingFolder
+        {
+            DavEntry entry;
+            int depth;
+        };
+        std::deque<PendingFolder> folders;
+        for (const DavEntry &entry : entries)
+            if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
+                lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
+                lowered(entry.name) != "lost+found")
+                folders.push_back({entry, 1});
+
+        constexpr int kNestedPkgDepth = 8;
+        constexpr int kNestedPkgFolders = 250;
+        constexpr std::size_t kNestedPkgPending = 512;
+        int walked = 0;
+        while (!folders.empty() && walked < kNestedPkgFolders && !cancelled)
+        {
+            const PendingFolder folder = std::move(folders.front());
+            folders.pop_front();
+            if (folder.depth > kNestedPkgDepth)
+                continue;
+
+            std::vector<DavEntry> inside;
+            if (!list_folder(folder.entry.path + "/", &inside))
+                continue;
+            ++walked;
+            for (const DavEntry &entry : inside)
+            {
+                if (entry.folder)
+                {
+                    const std::string name = lowered(entry.name);
+                    if (folder.depth < kNestedPkgDepth && !entry.name.empty() &&
+                        entry.name[0] != '.' && name != "sce_sys" && name != "@eadir" &&
+                        name != "#recycle" && name != "lost+found" &&
+                        folders.size() < kNestedPkgPending)
+                        folders.push_back({entry, folder.depth + 1});
+                    continue;
+                }
+                if (!is_pkg(entry.name) ||
+                    entry.path.compare(0, root.size(), root) != 0)
+                    continue;
+                const bool already = std::any_of(
+                    candidates.begin(), candidates.end(),
+                    [&](const DavEntry &candidate)
+                    {
+                        return !candidate.folder && candidate.path == entry.path;
+                    });
+                if (!already)
+                    candidates.push_back(entry);
+            }
+            if ((walked % 25) == 0)
+                progress(walked, kNestedPkgFolders,
+                         "Finding nested PKGs: " + folder.entry.path.substr(root.size()));
         }
         if (cancelled)
             return;
