@@ -1060,7 +1060,7 @@ struct LibraryLoader::Job
         // finds packages in ordinary nested layouts without flooding the PS5
         // with thousands of synchronous directory requests.
         constexpr int kPkgWalkDepth = 8;
-        constexpr int kPkgWalkFolders = 250;
+        constexpr int kPkgWalkFolders = 2500;
         constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
         bool scan_limited = false;
