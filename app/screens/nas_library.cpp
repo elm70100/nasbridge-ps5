@@ -1047,6 +1047,8 @@ struct LibraryLoader::Job
             }
         }
 
+        // Walk sequentially with strict bounds: the PS5 previously faulted
+        // when the directory budget was raised substantially.
         struct PendingFolder
         {
             DavEntry entry;
@@ -1059,35 +1061,51 @@ struct LibraryLoader::Job
                 lowered(entry.name) != "lost+found")
                 folders.push_back({entry, 1});
 
-        constexpr int kNestedPkgDepth = 8;
-        constexpr int kNestedPkgFolders = 250;
-        constexpr std::size_t kNestedPkgPending = 512;
+        constexpr int kPkgWalkDepth = 8;
+        constexpr int kPkgWalkFolders = 250;
+        constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
-        while (!folders.empty() && walked < kNestedPkgFolders && !cancelled)
+        bool scan_limited = false;
+        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
         {
             const PendingFolder folder = std::move(folders.front());
             folders.pop_front();
-            if (folder.depth > kNestedPkgDepth)
+            if (folder.depth > kPkgWalkDepth)
                 continue;
 
             std::vector<DavEntry> inside;
             if (!list_folder(folder.entry.path + "/", &inside))
                 continue;
             ++walked;
+            bool has_sce_sys = false;
+
             for (const DavEntry &entry : inside)
             {
                 if (entry.folder)
                 {
-                    const std::string name = lowered(entry.name);
-                    if (folder.depth < kNestedPkgDepth && !entry.name.empty() &&
-                        entry.name[0] != '.' && name != "sce_sys" && name != "@eadir" &&
-                        name != "#recycle" && name != "lost+found" &&
-                        folders.size() < kNestedPkgPending)
-                        folders.push_back({entry, folder.depth + 1});
+                    const std::string child_name = lowered(entry.name);
+                    if (child_name == "sce_sys")
+                    {
+                        has_sce_sys = true;
+                        continue;
+                    }
+                    if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
+                        entry.name[0] != '.' && child_name != "@eadir" &&
+                        child_name != "#recycle" && child_name != "lost+found")
+                    {
+                        if (folders.size() < kPkgWalkPending)
+                            folders.push_back({entry, folder.depth + 1});
+                        else
+                            scan_limited = true;
+                    }
                     continue;
                 }
-                if (!is_pkg(entry.name) ||
-                    entry.path.compare(0, root.size(), root) != 0)
+                if (!is_pkg(entry.name))
+                    continue;
+                if (entry.path.compare(0, root.size(), root) != 0)
+                    continue;
+                const std::string relative = entry.path.substr(root.size());
+                if (relative.empty())
                     continue;
                 const bool already = std::any_of(
                     candidates.begin(), candidates.end(),
@@ -1098,10 +1116,16 @@ struct LibraryLoader::Job
                 if (!already)
                     candidates.push_back(entry);
             }
-            if ((walked % 25) == 0)
-                progress(walked, kNestedPkgFolders,
-                         "Finding nested PKGs: " + folder.entry.path.substr(root.size()));
+
+            if ((walked % 10) == 0)
+                progress(walked, kPkgWalkFolders,
+                         "Scanning " + folder.entry.path.substr(root.size()));
         }
+        if (!folders.empty() || walked >= kPkgWalkFolders)
+            scan_limited = true;
+        if (scan_limited)
+            progress(walked, kPkgWalkFolders,
+                     "Scan limit reached; showing discovered PKG files");
         if (cancelled)
             return;
 
