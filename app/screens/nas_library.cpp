@@ -1028,25 +1028,18 @@ struct LibraryLoader::Job
             return;
         }
         std::vector<DavEntry> candidates;
-        // Keep game folders, images and packages at the configured root as
-        // before. In addition, walk every visible subfolder and collect PKGs
-        // at any depth (e.g. PS4/Action/Game/update.pkg). Paths are kept
-        // relative to root so cache keys remain unique for equal filenames.
+        // Root-level standalone images and PKGs remain candidates. Game
+        // folders are added only when their own listing contains sce_sys;
+        // this avoids treating every wrapper/category directory as a game.
         for (const DavEntry &entry : entries)
-            if (entry.folder || ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
+            if (!entry.folder && (ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name)))
                 candidates.push_back(entry);
 
-        // SMB has a batched, multi-sign-in tree walker. Use it instead of
-        // issuing one synchronous directory request at a time: on a NAS with
-        // many subfolders the latter can look like a hung library scan.
-        // WebDAV has no equivalent, so retain the bounded breadth-first walk.
-        // Use the same sequential, bounded traversal for SMB and WebDAV.
-        // The parallel SMB walker queued every discovered directory at once;
-        // on large Synology trees this could grow memory use until the PS5
-        // terminated the app. One directory per request keeps memory bounded.
+        // Walk sequentially with strict bounds: the PS5 previously faulted
+        // when the directory budget was raised substantially.
         struct PendingFolder
         {
-            std::string path;
+            DavEntry entry;
             int depth;
         };
         std::deque<PendingFolder> folders;
@@ -1054,11 +1047,8 @@ struct LibraryLoader::Job
             if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
                 lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
                 lowered(entry.name) != "lost+found")
-                folders.push_back({entry.path, 1});
+                folders.push_back({entry, 1});
 
-        // Keep the scan responsive on large SMB shares. A bounded walk still
-        // finds packages in ordinary nested layouts without flooding the PS5
-        // with thousands of synchronous directory requests.
         constexpr int kPkgWalkDepth = 8;
         constexpr int kPkgWalkFolders = 250;
         constexpr std::size_t kPkgWalkPending = 512;
@@ -1072,20 +1062,27 @@ struct LibraryLoader::Job
                 continue;
 
             std::vector<DavEntry> inside;
-            if (!list_folder(folder.path + "/", &inside))
+            if (!list_folder(folder.entry.path + "/", &inside))
                 continue;
             ++walked;
+            bool has_sce_sys = false;
 
             for (const DavEntry &entry : inside)
             {
                 if (entry.folder)
                 {
+                    const std::string child_name = lowered(entry.name);
+                    if (child_name == "sce_sys")
+                    {
+                        has_sce_sys = true;
+                        continue;
+                    }
                     if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
-                        entry.name[0] != '.' && lowered(entry.name) != "@eadir" &&
-                        lowered(entry.name) != "#recycle" && lowered(entry.name) != "lost+found")
+                        entry.name[0] != '.' && child_name != "@eadir" &&
+                        child_name != "#recycle" && child_name != "lost+found")
                     {
                         if (folders.size() < kPkgWalkPending)
-                            folders.push_back({entry.path, folder.depth + 1});
+                            folders.push_back({entry, folder.depth + 1});
                         else
                             scan_limited = true;
                     }
@@ -1107,9 +1104,24 @@ struct LibraryLoader::Job
                 if (!already)
                     candidates.push_back(entry);
             }
+
+            // A folder containing sce_sys is a game candidate, including
+            // nested layouts such as /PS4/Action/Game/sce_sys.
+            if (has_sce_sys)
+            {
+                const bool already = std::any_of(
+                    candidates.begin(), candidates.end(),
+                    [&](const DavEntry &candidate)
+                    {
+                        return candidate.folder && candidate.path == folder.entry.path;
+                    });
+                if (!already)
+                    candidates.push_back(folder.entry);
+            }
+
             if ((walked % 10) == 0)
                 progress(walked, kPkgWalkFolders,
-                         "Scanning " + folder.path.substr(root.size()));
+                         "Scanning " + folder.entry.path.substr(root.size()));
         }
         if (!folders.empty() || walked >= kPkgWalkFolders)
             scan_limited = true;
