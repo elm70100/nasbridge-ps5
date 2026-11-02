@@ -1052,7 +1052,7 @@ struct LibraryLoader::Job
         // terminated the app. One directory per request keeps memory bounded.
         struct PendingFolder
         {
-            std::string path;
+            DavEntry entry;
             int depth;
         };
         std::deque<PendingFolder> folders;
@@ -1060,7 +1060,7 @@ struct LibraryLoader::Job
             if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
                 lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
                 lowered(entry.name) != "lost+found")
-                folders.push_back({entry.path, 1});
+                folders.push_back({entry, 1});
 
         // Keep the scan responsive on large SMB shares. A bounded walk still
         // finds packages in ordinary nested layouts without flooding the PS5
@@ -1070,6 +1070,7 @@ struct LibraryLoader::Job
         constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
         std::size_t discovered_nested_pkgs = 0;
+        std::size_t discovered_nested_games = 0;
         bool scan_limited = false;
         while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
         {
@@ -1079,20 +1080,27 @@ struct LibraryLoader::Job
                 continue;
 
             std::vector<DavEntry> inside;
-            if (!list_folder(folder.path + "/", &inside))
+            if (!list_folder(folder.entry.path + "/", &inside))
                 continue;
             ++walked;
+            bool has_sce_sys = false;
 
             for (const DavEntry &entry : inside)
             {
                 if (entry.folder)
                 {
+                    const std::string child_name = lowered(entry.name);
+                    if (child_name == "sce_sys")
+                    {
+                        has_sce_sys = true;
+                        continue;
+                    }
                     if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
-                        entry.name[0] != '.' && lowered(entry.name) != "@eadir" &&
-                        lowered(entry.name) != "#recycle" && lowered(entry.name) != "lost+found")
+                        entry.name[0] != '.' && child_name != "@eadir" &&
+                        child_name != "#recycle" && child_name != "lost+found")
                     {
                         if (folders.size() < kPkgWalkPending)
-                            folders.push_back({entry.path, folder.depth + 1});
+                            folders.push_back({entry, folder.depth + 1});
                         else
                             scan_limited = true;
                     }
@@ -1117,9 +1125,27 @@ struct LibraryLoader::Job
                     ++discovered_nested_pkgs;
                 }
             }
+
+            // A nested folder is a game candidate when it directly contains
+            // sce_sys. read_folder() performs the full metadata validation.
+            if (has_sce_sys)
+            {
+                const bool already = std::any_of(
+                    candidates.begin(), candidates.end(),
+                    [&](const DavEntry &candidate)
+                    {
+                        return candidate.folder && candidate.path == folder.entry.path;
+                    });
+                if (!already)
+                {
+                    candidates.push_back(folder.entry);
+                    ++discovered_nested_games;
+                }
+            }
+
             if ((walked % 10) == 0)
                 progress(walked, kPkgWalkFolders,
-                         "Scanning " + folder.path.substr(root.size()));
+                         "Scanning " + folder.entry.path.substr(root.size()));
         }
         if (!folders.empty() || walked >= kPkgWalkFolders)
             scan_limited = true;
@@ -1259,6 +1285,7 @@ struct LibraryLoader::Job
                  std::to_string(root_folder_count) + " root folders; " +
                  std::to_string(walked) + " subfolders checked; " +
                  std::to_string(discovered_nested_pkgs) + " nested PKGs; " +
+                 std::to_string(discovered_nested_games) + " nested game folders; " +
                  std::to_string(accepted_folders) + " game folders accepted; " +
                  std::to_string(rejected_folders) + " folders rejected; " +
                  std::to_string(games.size()) + " items");
