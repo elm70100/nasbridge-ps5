@@ -1027,14 +1027,20 @@ struct LibraryLoader::Job
             fail(explain_nas_failure(connection, listing));
             return;
         }
+        const std::size_t root_entry_count = entries.size();
+        std::size_t root_folder_count = 0;
         std::vector<DavEntry> candidates;
         // Keep game folders, images and packages at the configured root as
         // before. In addition, walk every visible subfolder and collect PKGs
         // at any depth (e.g. PS4/Action/Game/update.pkg). Paths are kept
         // relative to root so cache keys remain unique for equal filenames.
         for (const DavEntry &entry : entries)
+        {
+            if (entry.folder)
+                ++root_folder_count;
             if (entry.folder || ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
                 candidates.push_back(entry);
+        }
 
         // SMB has a batched, multi-sign-in tree walker. Use it instead of
         // issuing one synchronous directory request at a time: on a NAS with
@@ -1063,6 +1069,7 @@ struct LibraryLoader::Job
         constexpr int kPkgWalkFolders = 250;
         constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
+        std::size_t discovered_nested_pkgs = 0;
         bool scan_limited = false;
         while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
         {
@@ -1105,7 +1112,10 @@ struct LibraryLoader::Job
                         return !candidate.folder && candidate.path == entry.path;
                     });
                 if (!already)
+                {
                     candidates.push_back(entry);
+                    ++discovered_nested_pkgs;
+                }
             }
             if ((walked % 10) == 0)
                 progress(walked, kPkgWalkFolders,
@@ -1121,6 +1131,8 @@ struct LibraryLoader::Job
 
         // 3. Each game: unchanged ones come from the cache, the rest are read.
         std::vector<NasGame> games;
+        std::size_t rejected_folders = 0;
+        std::size_t accepted_folders = 0;
         std::map<std::string, std::string> fresh_covers; // entry -> cover bytes
         const int total = static_cast<int>(candidates.size());
         for (int k = 0; k < total; ++k)
@@ -1191,8 +1203,11 @@ struct LibraryLoader::Job
                 }
                 else if (!read_folder(root, &game))
                 {
+                    ++rejected_folders;
                     continue; // not a game (a backport, a patch, an empty folder)
                 }
+                if (entry.folder)
+                    ++accepted_folders;
                 if (game.image)
                     read_image(root, &game);
             }
@@ -1239,6 +1254,14 @@ struct LibraryLoader::Job
             }
             games.push_back(std::move(game));
         }
+        progress(total, total,
+                 "Scan: " + std::to_string(root_entry_count) + " NAS entries; " +
+                 std::to_string(root_folder_count) + " root folders; " +
+                 std::to_string(walked) + " subfolders checked; " +
+                 std::to_string(discovered_nested_pkgs) + " nested PKGs; " +
+                 std::to_string(accepted_folders) + " game folders accepted; " +
+                 std::to_string(rejected_folders) + " folders rejected; " +
+                 std::to_string(games.size()) + " items");
         std::sort(games.begin(), games.end(), title_before);
         for (const NasGame &old : saved)
             if (find_saved(games, old.entry) == nullptr)
