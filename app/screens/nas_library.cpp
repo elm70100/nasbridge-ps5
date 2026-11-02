@@ -1052,85 +1052,103 @@ struct LibraryLoader::Job
             }
         }
 
-        // Walk sequentially with strict bounds: the PS5 previously faulted
-        // when the directory budget was raised substantially.
+        // Scan every direct child folder once: this NAS stores PKGs inside
+        // those folders, not as extracted sce_sys game folders. Keep the
+        // deeper traversal separately bounded to protect the PS5.
         struct PendingFolder
         {
             DavEntry entry;
             int depth;
         };
-        std::deque<PendingFolder> folders;
-        for (const DavEntry &entry : entries)
-            if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
-                lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
-                lowered(entry.name) != "lost+found")
-                folders.push_back({entry, 1});
-
-        constexpr int kPkgWalkDepth = 8;
-        constexpr int kPkgWalkFolders = 250;
-        constexpr std::size_t kPkgWalkPending = 512;
-        int walked = 0;
-        bool scan_limited = false;
-        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
+        std::deque<PendingFolder> nested_folders;
+        constexpr int kNestedPkgDepth = 8;
+        constexpr int kNestedPkgFolders = 250;
+        constexpr std::size_t kNestedPkgPending = 512;
+        int root_walked = 0;
+        int nested_walked = 0;
+        const auto add_nested_pkg = [&](const DavEntry &entry)
         {
-            const PendingFolder folder = std::move(folders.front());
-            folders.pop_front();
-            if (folder.depth > kPkgWalkDepth)
-                continue;
+            if (!is_pkg(entry.name) ||
+                entry.path.compare(0, root.size(), root) != 0)
+                return;
+            const bool already = std::any_of(
+                candidates.begin(), candidates.end(),
+                [&](const DavEntry &candidate)
+                {
+                    return !candidate.folder && candidate.path == entry.path;
+                });
+            if (!already)
+                candidates.push_back(entry);
+        };
+        const auto skip_folder = [](const DavEntry &entry)
+        {
+            if (entry.name.empty() || entry.name[0] == '.')
+                return true;
+            const std::string name = lowered(entry.name);
+            return name == "sce_sys" || name == "@eadir" ||
+                   name == "#recycle" || name == "lost+found";
+        };
 
+        // First pass: all 1,100 (or more) folders directly under /PS4.
+        for (const DavEntry &folder : entries)
+        {
+            if (cancelled)
+                return;
+            if (!folder.folder || skip_folder(folder))
+                continue;
             std::vector<DavEntry> inside;
-            if (!list_folder(folder.entry.path + "/", &inside))
+            if (!list_folder(folder.path + "/", &inside))
+            {
+                ++root_walked;
                 continue;
-            ++walked;
-            bool has_sce_sys = false;
-
+            }
+            ++root_walked;
             for (const DavEntry &entry : inside)
             {
                 if (entry.folder)
                 {
-                    const std::string child_name = lowered(entry.name);
-                    if (child_name == "sce_sys")
-                    {
-                        has_sce_sys = true;
-                        continue;
-                    }
-                    if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
-                        entry.name[0] != '.' && child_name != "@eadir" &&
-                        child_name != "#recycle" && child_name != "lost+found")
-                    {
-                        if (folders.size() < kPkgWalkPending)
-                            folders.push_back({entry, folder.depth + 1});
-                        else
-                            scan_limited = true;
-                    }
+                    if (nested_folders.size() < kNestedPkgPending &&
+                        nested_folders.size() < static_cast<std::size_t>(kNestedPkgFolders))
+                        nested_folders.push_back({entry, 2});
                     continue;
                 }
-                if (!is_pkg(entry.name))
-                    continue;
-                if (entry.path.compare(0, root.size(), root) != 0)
-                    continue;
-                const std::string relative = entry.path.substr(root.size());
-                if (relative.empty())
-                    continue;
-                const bool already = std::any_of(
-                    candidates.begin(), candidates.end(),
-                    [&](const DavEntry &candidate)
-                    {
-                        return !candidate.folder && candidate.path == entry.path;
-                    });
-                if (!already)
-                    candidates.push_back(entry);
+                add_nested_pkg(entry);
             }
-
-            if ((walked % 10) == 0)
-                progress(walked, kPkgWalkFolders,
-                         "Scanning " + folder.entry.path.substr(root.size()));
+            if ((root_walked % 25) == 0 || root_walked == static_cast<int>(root_folder_count))
+                progress(root_walked, static_cast<int>(root_folder_count),
+                         "Scanning PS4 folders: " + std::to_string(root_walked) + "/" +
+                         std::to_string(root_folder_count));
         }
-        if (!folders.empty() || walked >= kPkgWalkFolders)
+
+        // Second pass: bounded deeper search for PKGs in nested subfolders.
+        while (!nested_folders.empty() && nested_walked < kNestedPkgFolders && !cancelled)
+        {
+            const PendingFolder folder = std::move(nested_folders.front());
+            nested_folders.pop_front();
+            if (folder.depth > kNestedPkgDepth || skip_folder(folder.entry))
+                continue;
+            std::vector<DavEntry> inside;
+            if (!list_folder(folder.entry.path + "/", &inside))
+                continue;
+            ++nested_walked;
+            for (const DavEntry &entry : inside)
+            {
+                if (entry.folder)
+                {
+                    if (folder.depth < kNestedPkgDepth &&
+                        nested_folders.size() < kNestedPkgPending)
+                        nested_folders.push_back({entry, folder.depth + 1});
+                    continue;
+                }
+                add_nested_pkg(entry);
+            }
+        }
+        if (!nested_folders.empty() || nested_walked >= kNestedPkgFolders)
             scan_limited = true;
         if (scan_limited)
-            progress(walked, kPkgWalkFolders,
-                     "Scan limit reached; showing discovered PKG files");
+            progress(root_walked, static_cast<int>(root_folder_count),
+                     "Deeper PKG scan limited to " + std::to_string(kNestedPkgFolders) +
+                     " subfolders");
         if (cancelled)
             return;
 
