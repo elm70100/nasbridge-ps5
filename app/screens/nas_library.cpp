@@ -1027,136 +1027,100 @@ struct LibraryLoader::Job
             fail(explain_nas_failure(connection, listing));
             return;
         }
-        const std::size_t root_entry_count = entries.size();
-        std::size_t root_folder_count = 0;
-        std::size_t root_file_count = 0;
         std::vector<DavEntry> candidates;
-        // All direct child folders are candidates: read_folder() validates
-        // whether each one is a game. Keep a bounded walk for nested PKGs,
-        // which may live below collection/wrapper folders.
+        // Keep game folders, images and packages at the configured root as
+        // before. In addition, walk every visible subfolder and collect PKGs
+        // at any depth (e.g. PS4/Action/Game/update.pkg). Paths are kept
+        // relative to root so cache keys remain unique for equal filenames.
         for (const DavEntry &entry : entries)
-        {
-            if (entry.folder)
-            {
-                const std::string name = lowered(entry.name);
-                if (entry.name.empty() || entry.name[0] == '.' || name == "@eadir" ||
-                    name == "#recycle" || name == "lost+found")
-                    continue;
-                ++root_folder_count;
+            if (entry.folder || ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
                 candidates.push_back(entry);
-            }
-            else if (ends_with_nocase(entry.name, ".exfat") || is_pkg(entry.name))
-            {
-                ++root_file_count;
-                candidates.push_back(entry);
-            }
-        }
 
-        // Scan every direct child folder once: this NAS stores PKGs inside
-        // those folders, not as extracted sce_sys game folders. Keep the
-        // deeper traversal separately bounded to protect the PS5.
+        // SMB has a batched, multi-sign-in tree walker. Use it instead of
+        // issuing one synchronous directory request at a time: on a NAS with
+        // many subfolders the latter can look like a hung library scan.
+        // WebDAV has no equivalent, so retain the bounded breadth-first walk.
+        // Use the same sequential, bounded traversal for SMB and WebDAV.
+        // The parallel SMB walker queued every discovered directory at once;
+        // on large Synology trees this could grow memory use until the PS5
+        // terminated the app. One directory per request keeps memory bounded.
         struct PendingFolder
         {
-            DavEntry entry;
+            std::string path;
             int depth;
         };
-        std::deque<PendingFolder> nested_folders;
-        constexpr int kNestedPkgDepth = 8;
-        constexpr int kNestedPkgFolders = 250;
-        constexpr std::size_t kNestedPkgPending = 512;
-        int root_walked = 0;
-        int nested_walked = 0;
-        bool scan_limited = false;
-        const auto add_nested_pkg = [&](const DavEntry &entry)
-        {
-            if (!is_pkg(entry.name) ||
-                entry.path.compare(0, root.size(), root) != 0)
-                return;
-            const bool already = std::any_of(
-                candidates.begin(), candidates.end(),
-                [&](const DavEntry &candidate)
-                {
-                    return !candidate.folder && candidate.path == entry.path;
-                });
-            if (!already)
-                candidates.push_back(entry);
-        };
-        const auto skip_folder = [](const DavEntry &entry)
-        {
-            if (entry.name.empty() || entry.name[0] == '.')
-                return true;
-            const std::string name = lowered(entry.name);
-            return name == "sce_sys" || name == "@eadir" ||
-                   name == "#recycle" || name == "lost+found";
-        };
+        std::deque<PendingFolder> folders;
+        for (const DavEntry &entry : entries)
+            if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
+                lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
+                lowered(entry.name) != "lost+found")
+                folders.push_back({entry.path, 1});
 
-        // First pass: all 1,100 (or more) folders directly under /PS4.
-        for (const DavEntry &folder : entries)
+        // Keep the scan responsive on large SMB shares. A bounded walk still
+        // finds packages in ordinary nested layouts without flooding the PS5
+        // with thousands of synchronous directory requests.
+        constexpr int kPkgWalkDepth = 8;
+        constexpr int kPkgWalkFolders = 250;
+        constexpr std::size_t kPkgWalkPending = 512;
+        int walked = 0;
+        bool scan_limited = false;
+        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
         {
-            if (cancelled)
-                return;
-            if (!folder.folder || skip_folder(folder))
+            const PendingFolder folder = std::move(folders.front());
+            folders.pop_front();
+            if (folder.depth > kPkgWalkDepth)
                 continue;
+
             std::vector<DavEntry> inside;
             if (!list_folder(folder.path + "/", &inside))
-            {
-                ++root_walked;
                 continue;
-            }
-            ++root_walked;
-            for (const DavEntry &entry : inside)
-            {
-                if (entry.folder)
-                {
-                    if (nested_folders.size() < kNestedPkgPending &&
-                        nested_folders.size() < static_cast<std::size_t>(kNestedPkgFolders))
-                        nested_folders.push_back({entry, 2});
-                    continue;
-                }
-                add_nested_pkg(entry);
-            }
-            if ((root_walked % 25) == 0 || root_walked == static_cast<int>(root_folder_count))
-                progress(root_walked, static_cast<int>(root_folder_count),
-                         "Scanning PS4 folders: " + std::to_string(root_walked) + "/" +
-                         std::to_string(root_folder_count));
-        }
+            ++walked;
 
-        // Second pass: bounded deeper search for PKGs in nested subfolders.
-        while (!nested_folders.empty() && nested_walked < kNestedPkgFolders && !cancelled)
-        {
-            const PendingFolder folder = std::move(nested_folders.front());
-            nested_folders.pop_front();
-            if (folder.depth > kNestedPkgDepth || skip_folder(folder.entry))
-                continue;
-            std::vector<DavEntry> inside;
-            if (!list_folder(folder.entry.path + "/", &inside))
-                continue;
-            ++nested_walked;
             for (const DavEntry &entry : inside)
             {
                 if (entry.folder)
                 {
-                    if (folder.depth < kNestedPkgDepth &&
-                        nested_folders.size() < kNestedPkgPending)
-                        nested_folders.push_back({entry, folder.depth + 1});
+                    if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
+                        entry.name[0] != '.' && lowered(entry.name) != "@eadir" &&
+                        lowered(entry.name) != "#recycle" && lowered(entry.name) != "lost+found")
+                    {
+                        if (folders.size() < kPkgWalkPending)
+                            folders.push_back({entry.path, folder.depth + 1});
+                        else
+                            scan_limited = true;
+                    }
                     continue;
                 }
-                add_nested_pkg(entry);
+                if (!is_pkg(entry.name))
+                    continue;
+                if (entry.path.compare(0, root.size(), root) != 0)
+                    continue;
+                const std::string relative = entry.path.substr(root.size());
+                if (relative.empty())
+                    continue;
+                const bool already = std::any_of(
+                    candidates.begin(), candidates.end(),
+                    [&](const DavEntry &candidate)
+                    {
+                        return !candidate.folder && candidate.path == entry.path;
+                    });
+                if (!already)
+                    candidates.push_back(entry);
             }
+            if ((walked % 10) == 0)
+                progress(walked, kPkgWalkFolders,
+                         "Scanning " + folder.path.substr(root.size()));
         }
-        if (!nested_folders.empty() || nested_walked >= kNestedPkgFolders)
+        if (!folders.empty() || walked >= kPkgWalkFolders)
             scan_limited = true;
         if (scan_limited)
-            progress(root_walked, static_cast<int>(root_folder_count),
-                     "Deeper PKG scan limited to " + std::to_string(kNestedPkgFolders) +
-                     " subfolders");
+            progress(walked, kPkgWalkFolders,
+                     "Scan limit reached; showing discovered PKG files");
         if (cancelled)
             return;
 
         // 3. Each game: unchanged ones come from the cache, the rest are read.
         std::vector<NasGame> games;
-        std::size_t accepted_root_folders = 0;
-        std::size_t rejected_root_folders = 0;
         std::map<std::string, std::string> fresh_covers; // entry -> cover bytes
         const int total = static_cast<int>(candidates.size());
         for (int k = 0; k < total; ++k)
@@ -1273,13 +1237,6 @@ struct LibraryLoader::Job
                         fresh_covers[game.entry] = std::move(cover);
                 }
             }
-            if (entry.folder)
-            {
-                if (game.image || !game.base.empty() || !game.title_id.empty())
-                    ++accepted_root_folders;
-                else
-                    ++rejected_root_folders;
-            }
             games.push_back(std::move(game));
         }
         std::sort(games.begin(), games.end(), title_before);
@@ -1292,13 +1249,6 @@ struct LibraryLoader::Job
             event.games = games;
             post(std::move(event));
         }
-        progress(total, total,
-                 "Scan: " + std::to_string(root_entry_count) + " NAS entries, " +
-                 std::to_string(root_folder_count) + " folders, " +
-                 std::to_string(root_file_count) + " PKG/image files; " +
-                 std::to_string(accepted_root_folders) + " folders accepted, " +
-                 std::to_string(rejected_root_folders) + " rejected; " +
-                 std::to_string(games.size()) + " items total");
         for (const auto &[entry, data] : fresh_covers)
         {
             if (cancelled)
