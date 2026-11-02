@@ -1066,6 +1066,7 @@ struct LibraryLoader::Job
         constexpr std::size_t kNestedPkgPending = 512;
         int root_walked = 0;
         int nested_walked = 0;
+        bool scan_limited = false;
         const auto add_nested_pkg = [&](const DavEntry &entry)
         {
             if (!is_pkg(entry.name) ||
