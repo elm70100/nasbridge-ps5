@@ -1066,7 +1066,7 @@ struct LibraryLoader::Job
         // Inspect every root folder for PKGs, but do not recursively descend:
         // deeper traversal caused excessive SMB requests and PS5 crashes.
         constexpr int kPkgWalkDepth = 8;
-        constexpr int kPkgWalkFolders = 1200;
+        constexpr int kPkgWalkFolders = 250;
         constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
         std::size_t discovered_nested_pkgs = 0;
