@@ -1065,7 +1065,7 @@ struct LibraryLoader::Job
         // The PS4 NAS layout commonly has one game folder per root entry.
         // Inspect every root folder for PKGs, but do not recursively descend:
         // deeper traversal caused excessive SMB requests and PS5 crashes.
-        constexpr int kPkgWalkDepth = 1;
+        constexpr int kPkgWalkDepth = 8;
         constexpr int kPkgWalkFolders = 1200;
         constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
