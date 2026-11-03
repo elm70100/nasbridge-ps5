@@ -1062,11 +1062,11 @@ struct LibraryLoader::Job
                 lowered(entry.name) != "lost+found")
                 folders.push_back({entry.path, 1});
 
-        // Keep the scan responsive on large SMB shares. A bounded walk still
-        // finds packages in ordinary nested layouts without flooding the PS5
-        // with thousands of synchronous directory requests.
-        constexpr int kPkgWalkDepth = 8;
-        constexpr int kPkgWalkFolders = 250;
+        // The PS4 NAS layout commonly has one game folder per root entry.
+        // Inspect every root folder for PKGs, but do not recursively descend:
+        // deeper traversal caused excessive SMB requests and PS5 crashes.
+        constexpr int kPkgWalkDepth = 1;
+        constexpr int kPkgWalkFolders = 1200;
         constexpr std::size_t kPkgWalkPending = 512;
         int walked = 0;
         std::size_t discovered_nested_pkgs = 0;
