@@ -1042,16 +1042,40 @@ struct LibraryLoader::Job
                 candidates.push_back(entry);
         }
 
-        // Inspect each folder directly under the configured root. The NAS
-        // listing already contains all root entries; the previous breadth-first
-        // walk spent its 250-request budget on the first 250 root folders.
-        // Keep this pass flat: read_folder() independently validates game
-        // metadata, while this pass collects PKGs stored directly in each
-        // root folder. Avoid recursive SMB requests, which caused PS5 faults.
+        // Inspect every folder directly under the configured root. This
+        // flat pass is what lets a library with 1,100 root folders get past
+        // the old 250-folder ceiling. Keep a separate, much smaller breadth-
+        // first budget for packages stored deeper (Collection/Deep/file.pkg).
+        struct PendingNested
+        {
+            DavEntry entry;
+            int depth;
+        };
+        std::deque<PendingNested> nested_folders;
         constexpr int kPkgRootFolderBudget = 1200;
+        constexpr int kPkgNestedFolderBudget = 250;
+        constexpr int kPkgNestedDepth = 4;
         int walked = 0;
+        int nested_walked = 0;
         std::size_t discovered_nested_pkgs = 0;
         bool scan_limited = false;
+        auto add_nested_pkg = [&](const DavEntry &entry)
+        {
+            if (entry.folder || !is_pkg(entry.name) ||
+                entry.path.compare(0, root.size(), root) != 0)
+                return;
+            const bool already = std::any_of(
+                candidates.begin(), candidates.end(),
+                [&](const DavEntry &candidate)
+                {
+                    return !candidate.folder && candidate.path == entry.path;
+                });
+            if (!already)
+            {
+                candidates.push_back(entry);
+                ++discovered_nested_pkgs;
+            }
+        };
         for (const DavEntry &folder : entries)
         {
             if (cancelled)
@@ -1073,21 +1097,12 @@ struct LibraryLoader::Job
             {
                 for (const DavEntry &entry : inside)
                 {
-                    if (entry.folder || !is_pkg(entry.name))
-                        continue;
-                    if (entry.path.compare(0, root.size(), root) != 0)
-                        continue;
-                    const bool already = std::any_of(
-                        candidates.begin(), candidates.end(),
-                        [&](const DavEntry &candidate)
-                        {
-                            return !candidate.folder && candidate.path == entry.path;
-                        });
-                    if (!already)
-                    {
-                        candidates.push_back(entry);
-                        ++discovered_nested_pkgs;
-                    }
+                    add_nested_pkg(entry);
+                    if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
+                        lowered(entry.name) != "@eadir" &&
+                        lowered(entry.name) != "#recycle" &&
+                        lowered(entry.name) != "lost+found")
+                        nested_folders.push_back({entry, 1});
                 }
             }
             ++walked;
@@ -1099,9 +1114,42 @@ struct LibraryLoader::Job
                 yield_now();
             }
         }
+
+        while (!nested_folders.empty() && nested_walked < kPkgNestedFolderBudget && !cancelled)
+        {
+            const PendingNested folder = std::move(nested_folders.front());
+            nested_folders.pop_front();
+            if (folder.depth > kPkgNestedDepth)
+                continue;
+            std::vector<DavEntry> inside;
+            if (!list_folder(folder.entry.path + "/", &inside))
+                continue;
+            ++nested_walked;
+            for (const DavEntry &entry : inside)
+            {
+                add_nested_pkg(entry);
+                if (entry.folder && folder.depth < kPkgNestedDepth &&
+                    !entry.name.empty() && entry.name[0] != '.' &&
+                    lowered(entry.name) != "@eadir" &&
+                    lowered(entry.name) != "#recycle" &&
+                    lowered(entry.name) != "lost+found")
+                    nested_folders.push_back({entry, folder.depth + 1});
+            }
+            if ((nested_walked % 10) == 0)
+            {
+                progress(nested_walked, kPkgNestedFolderBudget,
+                         "Scanning nested folder " + folder.entry.name);
+                yield_now();
+            }
+        }
+        if (!nested_folders.empty() || walked >= kPkgRootFolderBudget)
+            scan_limited = true;
         if (scan_limited)
             progress(walked, kPkgRootFolderBudget,
-                     "Root-folder scan limit reached; showing discovered PKG files");
+                     "Scan limit reached; showing discovered PKG files");
+        if (cancelled)
+            return;
+
         if (cancelled)
             return;
 
