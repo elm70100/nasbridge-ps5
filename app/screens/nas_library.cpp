@@ -1042,90 +1042,66 @@ struct LibraryLoader::Job
                 candidates.push_back(entry);
         }
 
-        // SMB has a batched, multi-sign-in tree walker. Use it instead of
-        // issuing one synchronous directory request at a time: on a NAS with
-        // many subfolders the latter can look like a hung library scan.
-        // WebDAV has no equivalent, so retain the bounded breadth-first walk.
-        // Use the same sequential, bounded traversal for SMB and WebDAV.
-        // The parallel SMB walker queued every discovered directory at once;
-        // on large Synology trees this could grow memory use until the PS5
-        // terminated the app. One directory per request keeps memory bounded.
-        struct PendingFolder
-        {
-            std::string path;
-            int depth;
-        };
-        std::deque<PendingFolder> folders;
-        for (const DavEntry &entry : entries)
-            if (entry.folder && !entry.name.empty() && entry.name[0] != '.' &&
-                lowered(entry.name) != "@eadir" && lowered(entry.name) != "#recycle" &&
-                lowered(entry.name) != "lost+found")
-                folders.push_back({entry.path, 1});
-
-        // The PS4 NAS layout commonly has one game folder per root entry.
-        // Inspect every root folder for PKGs, but do not recursively descend:
-        // deeper traversal caused excessive SMB requests and PS5 crashes.
-        constexpr int kPkgWalkDepth = 8;
-        constexpr int kPkgWalkFolders = 250;
-        constexpr std::size_t kPkgWalkPending = 512;
+        // Inspect each folder directly under the configured root. The NAS
+        // listing already contains all root entries; the previous breadth-first
+        // walk spent its 250-request budget on the first 250 root folders.
+        // Keep this pass flat: read_folder() independently validates game
+        // metadata, while this pass collects PKGs stored directly in each
+        // root folder. Avoid recursive SMB requests, which caused PS5 faults.
+        constexpr int kPkgRootFolderBudget = 1200;
         int walked = 0;
         std::size_t discovered_nested_pkgs = 0;
         bool scan_limited = false;
-        while (!folders.empty() && walked < kPkgWalkFolders && !cancelled)
+        for (const DavEntry &folder : entries)
         {
-            const PendingFolder folder = std::move(folders.front());
-            folders.pop_front();
-            if (folder.depth > kPkgWalkDepth)
+            if (cancelled)
+                return;
+            if (!folder.folder || folder.name.empty() || folder.name[0] == '.')
                 continue;
+            const std::string folder_name = lowered(folder.name);
+            if (folder_name == "@eadir" || folder_name == "#recycle" ||
+                folder_name == "lost+found")
+                continue;
+            if (walked >= kPkgRootFolderBudget)
+            {
+                scan_limited = true;
+                break;
+            }
 
             std::vector<DavEntry> inside;
-            if (!list_folder(folder.path + "/", &inside))
-                continue;
-            ++walked;
-
-            for (const DavEntry &entry : inside)
+            if (list_folder(folder.path + "/", &inside))
             {
-                if (entry.folder)
+                for (const DavEntry &entry : inside)
                 {
-                    if (folder.depth < kPkgWalkDepth && !entry.name.empty() &&
-                        entry.name[0] != '.' && lowered(entry.name) != "@eadir" &&
-                        lowered(entry.name) != "#recycle" && lowered(entry.name) != "lost+found")
+                    if (entry.folder || !is_pkg(entry.name))
+                        continue;
+                    if (entry.path.compare(0, root.size(), root) != 0)
+                        continue;
+                    const bool already = std::any_of(
+                        candidates.begin(), candidates.end(),
+                        [&](const DavEntry &candidate)
+                        {
+                            return !candidate.folder && candidate.path == entry.path;
+                        });
+                    if (!already)
                     {
-                        if (folders.size() < kPkgWalkPending)
-                            folders.push_back({entry.path, folder.depth + 1});
-                        else
-                            scan_limited = true;
+                        candidates.push_back(entry);
+                        ++discovered_nested_pkgs;
                     }
-                    continue;
-                }
-                if (!is_pkg(entry.name))
-                    continue;
-                if (entry.path.compare(0, root.size(), root) != 0)
-                    continue;
-                const std::string relative = entry.path.substr(root.size());
-                if (relative.empty())
-                    continue;
-                const bool already = std::any_of(
-                    candidates.begin(), candidates.end(),
-                    [&](const DavEntry &candidate)
-                    {
-                        return !candidate.folder && candidate.path == entry.path;
-                    });
-                if (!already)
-                {
-                    candidates.push_back(entry);
-                    ++discovered_nested_pkgs;
                 }
             }
+            ++walked;
             if ((walked % 10) == 0)
-                progress(walked, kPkgWalkFolders,
-                         "Scanning " + folder.path.substr(root.size()));
+            {
+                progress(walked, static_cast<int>(std::min<std::size_t>(
+                                     root_folder_count, kPkgRootFolderBudget)),
+                         "Scanning root folder " + folder.name);
+                yield_now();
+            }
         }
-        if (!folders.empty() || walked >= kPkgWalkFolders)
-            scan_limited = true;
         if (scan_limited)
-            progress(walked, kPkgWalkFolders,
-                     "Scan limit reached; showing discovered PKG files");
+            progress(walked, kPkgRootFolderBudget,
+                     "Root-folder scan limit reached; showing discovered PKG files");
         if (cancelled)
             return;
 
