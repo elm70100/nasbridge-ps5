@@ -1255,12 +1255,28 @@ struct LibraryLoader::Job
             // cache lost them.
             if (is_pkg(entry.name))
             {
-                const bool cover_missing = !game.cover_saved || !same || lost.count(game.entry) > 0;
-                if (cover_missing) {
-                    std::string cover;
+                // Embedded PKG cover extraction uses random reads into the
+                // package. Some NAS-hosted DLC/patch packages have layouts
+                // that have triggered SIGILL on the PS5 during this step.
+                // Keep discovering and listing nested PKGs, but only inspect
+                // embedded covers for packages directly in the configured
+                // root. Folder games and root-level PKGs retain their covers.
+                const bool nested_pkg = relative_entry.find('/') != std::string::npos;
+                if (nested_pkg)
+                {
                     game.cover_saved = false;
-                    if (fetch_pkg_cover(root, entry, &game, &cover) && !cover.empty())
-                        fresh_covers[game.entry] = std::move(cover);
+                    if (game.note.empty())
+                        game.note = "Nested PKG listed; embedded cover check skipped for stability.";
+                }
+                else
+                {
+                    const bool cover_missing = !game.cover_saved || !same || lost.count(game.entry) > 0;
+                    if (cover_missing) {
+                        std::string cover;
+                        game.cover_saved = false;
+                        if (fetch_pkg_cover(root, entry, &game, &cover) && !cover.empty())
+                            fresh_covers[game.entry] = std::move(cover);
+                    }
                 }
             }
             else
