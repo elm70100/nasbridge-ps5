@@ -1294,6 +1294,58 @@ struct LibraryLoader::Job
             }
             games.push_back(std::move(game));
         }
+        // Reuse the parent game's cached cover for DLC/updates whose path
+        // carries the same CUSA title ID. This avoids reading the PKG directory
+        // table on the PS5 and keeps packages as separate library entries.
+        auto cusa_from = [](const std::string &value) -> std::string
+        {
+            const std::string low = lowered(value);
+            const std::size_t at = low.find("cusa");
+            if (at == std::string::npos || at + 9 > low.size())
+                return {};
+            for (std::size_t i = at + 4; i < at + 9; ++i)
+                if (low[i] < '0' || low[i] > '9')
+                    return {};
+            return low.substr(at, 9);
+        };
+        for (NasGame &package : games)
+        {
+            if (cancelled)
+                return;
+            if (package.image || package.cover_saved ||
+                !ends_with_nocase(package.entry, ".pkg"))
+                continue;
+            const std::string cusa = cusa_from(package.entry);
+            if (cusa.empty())
+                continue;
+            const NasGame *parent = nullptr;
+            for (const NasGame &candidate : games)
+            {
+                if (candidate.entry == package.entry || candidate.image ||
+                    candidate.title_id.empty())
+                    continue;
+                if (lowered(candidate.title_id) == cusa)
+                {
+                    parent = &candidate;
+                    break;
+                }
+            }
+            if (parent == nullptr)
+                continue;
+            std::string cover;
+            const auto fresh = fresh_covers.find(parent->entry);
+            if (fresh != fresh_covers.end())
+                cover = fresh->second;
+            else if (!parent->cover_saved ||
+                     !load_picture(cover_path(parent->entry), &cover, kMaxIcon))
+                continue;
+            if (!cover.empty() && save_picture(cover_path(package.entry), cover))
+            {
+                package.cover_saved = true;
+                fresh_covers[package.entry] = std::move(cover);
+            }
+        }
+
         progress(total, total,
                  "Scan: " + std::to_string(root_entry_count) + " NAS entries; " +
                  std::to_string(root_folder_count) + " root folders; " +
