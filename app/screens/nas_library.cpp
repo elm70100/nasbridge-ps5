@@ -1337,18 +1337,40 @@ struct LibraryLoader::Job
             // In that case, match the nearest listed game folder by path.
             if (parent == nullptr)
             {
-                std::size_t best_length = 0;
+                std::size_t best_score = 0;
+                const std::size_t package_slash = package.entry.find_last_of('/');
+                const std::string package_parent = package_slash == std::string::npos
+                    ? std::string() : package.entry.substr(0, package_slash);
                 for (const NasGame &candidate : games)
                 {
-                    if (candidate.entry == package.entry || candidate.image ||
-                        candidate.entry.size() <= best_length ||
-                        package.entry.compare(0, candidate.entry.size(), candidate.entry) != 0 ||
-                        package.entry[candidate.entry.size()] != '/')
+                    if (candidate.entry == package.entry || candidate.image)
                         continue;
-                    if (cusa_from(candidate.entry) == cusa)
+                    const std::string candidate_id = cusa_from(candidate.entry);
+                    const std::string title_id = lowered(candidate.title_id);
+                    if (candidate_id != cusa &&
+                        (title_id.empty() || title_id.compare(0, cusa.size(), cusa) != 0))
+                        continue;
+
+                    // Prefer a containing game folder, then a sibling in the
+                    // same directory. This also handles layouts where the
+                    // base game and its DLC PKGs are stored side by side.
+                    std::size_t score = 1;
+                    if (package.entry.compare(0, candidate.entry.size(), candidate.entry) == 0 &&
+                        package.entry.size() > candidate.entry.size() &&
+                        package.entry[candidate.entry.size()] == '/')
+                        score = 3;
+                    else
+                    {
+                        const std::size_t candidate_slash = candidate.entry.find_last_of('/');
+                        const std::string candidate_parent = candidate_slash == std::string::npos
+                            ? std::string() : candidate.entry.substr(0, candidate_slash);
+                        if (candidate_parent == package_parent)
+                            score = 2;
+                    }
+                    if (score > best_score)
                     {
                         parent = &candidate;
-                        best_length = candidate.entry.size();
+                        best_score = score;
                     }
                 }
             }
