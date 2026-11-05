@@ -1324,7 +1324,10 @@ struct LibraryLoader::Job
                 if (candidate.entry == package.entry || candidate.image ||
                     candidate.title_id.empty())
                     continue;
-                if (lowered(candidate.title_id) == cusa)
+                const std::string parent_id = lowered(candidate.title_id);
+                // param.json titleId commonly includes a suffix such as _00;
+                // compare the stable CUSA prefix rather than the whole value.
+                if (parent_id.compare(0, cusa.size(), cusa) == 0)
                 {
                     parent = &candidate;
                     break;
