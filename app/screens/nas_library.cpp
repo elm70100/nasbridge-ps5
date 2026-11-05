@@ -1321,16 +1321,35 @@ struct LibraryLoader::Job
             const NasGame *parent = nullptr;
             for (const NasGame &candidate : games)
             {
-                if (candidate.entry == package.entry || candidate.image ||
-                    candidate.title_id.empty())
+                if (candidate.entry == package.entry || candidate.image)
                     continue;
                 const std::string parent_id = lowered(candidate.title_id);
-                // param.json titleId commonly includes a suffix such as _00;
-                // compare the stable CUSA prefix rather than the whole value.
-                if (parent_id.compare(0, cusa.size(), cusa) == 0)
+                // Prefer the actual game titleId, allowing suffixes such as _00.
+                if (!parent_id.empty() &&
+                    parent_id.compare(0, cusa.size(), cusa) == 0)
                 {
                     parent = &candidate;
                     break;
+                }
+            }
+            // Some folder layouts have no readable param.json/titleId even
+            // though the CUSA is present in the containing directory name.
+            // In that case, match the nearest listed game folder by path.
+            if (parent == nullptr)
+            {
+                std::size_t best_length = 0;
+                for (const NasGame &candidate : games)
+                {
+                    if (candidate.entry == package.entry || candidate.image ||
+                        candidate.entry.size() <= best_length ||
+                        package.entry.compare(0, candidate.entry.size(), candidate.entry) != 0 ||
+                        package.entry[candidate.entry.size()] != '/')
+                        continue;
+                    if (cusa_from(candidate.entry) == cusa)
+                    {
+                        parent = &candidate;
+                        best_length = candidate.entry.size();
+                    }
                 }
             }
             if (parent == nullptr)
