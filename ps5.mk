@@ -296,7 +296,7 @@ LIBSMB2_HOST := $(APP_WORK)/src/concepts/smb.cpp $(addprefix $(APP_WORK)/$(LIBSM
   $(addprefix $(APP_WORK)/$(LIBSMB2_DIR)/lib/,$(LIBSMB2_SRCS))
 
 # Our code and the tests with warnings on; the kit's own files without.
-$(HOST_OBJ)/$(APP_WORK)/src/concepts/%.o: $(APP_WORK)/src/concepts/%.cpp | app-work
+$(HOST_OBJ)/$(APP_WORK)/src/concepts/%.o: app/screens/%.cpp | app-work
 	@mkdir -p $(@D)
 	clang++-18 -std=c++20 -O1 -Wall -Wextra -MMD -MP $(HOST_INCLUDES) -c $< -o $@
 $(HOST_OBJ)/tests/%.o: tests/%.cpp | app-work
