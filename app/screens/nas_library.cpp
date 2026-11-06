@@ -1294,9 +1294,9 @@ struct LibraryLoader::Job
             }
             games.push_back(std::move(game));
         }
-        // Reuse the parent game's cached cover for DLC/updates whose path
-        // carries the same CUSA title ID. This avoids reading the PKG directory
-        // table on the PS5 and keeps packages as separate library entries.
+        // Reuse a real game cover for DLC/updates with the same CUSA.
+        // Only select candidates whose cover bytes are actually available; a
+        // matching titleId without a saved/fresh cover must not stop the search.
         auto cusa_from = [](const std::string &value) -> std::string
         {
             const std::string low = lowered(value);
@@ -1308,6 +1308,7 @@ struct LibraryLoader::Job
                     return {};
             return low.substr(at, 9);
         };
+        std::map<std::string, std::string> parent_cover_cache;
         for (NasGame &package : games)
         {
             if (cancelled)
@@ -1318,75 +1319,70 @@ struct LibraryLoader::Job
             const std::string cusa = cusa_from(package.entry);
             if (cusa.empty())
                 continue;
-            const NasGame *parent = nullptr;
+
+            const std::size_t package_slash = package.entry.find_last_of('/');
+            const std::string package_parent = package_slash == std::string::npos
+                ? std::string() : package.entry.substr(0, package_slash);
+            const NasGame *best_parent = nullptr;
+            std::string best_cover;
+            int best_score = 0;
+
             for (const NasGame &candidate : games)
             {
-                if (candidate.entry == package.entry || candidate.image)
+                if (candidate.entry == package.entry || candidate.image ||
+                    ends_with_nocase(candidate.entry, ".pkg"))
                     continue;
-                const std::string parent_id = lowered(candidate.title_id);
-                // Prefer the actual game titleId, allowing suffixes such as _00.
-                if (!parent_id.empty() &&
-                    parent_id.compare(0, cusa.size(), cusa) == 0)
-                {
-                    parent = &candidate;
-                    break;
-                }
-            }
-            // Some folder layouts have no readable param.json/titleId even
-            // though the CUSA is present in the containing directory name.
-            // In that case, match the nearest listed game folder by path.
-            if (parent == nullptr)
-            {
-                std::size_t best_score = 0;
-                const std::size_t package_slash = package.entry.find_last_of('/');
-                const std::string package_parent = package_slash == std::string::npos
-                    ? std::string() : package.entry.substr(0, package_slash);
-                for (const NasGame &candidate : games)
-                {
-                    if (candidate.entry == package.entry || candidate.image)
-                        continue;
-                    const std::string candidate_id = cusa_from(candidate.entry);
-                    const std::string title_id = lowered(candidate.title_id);
-                    if (candidate_id != cusa &&
-                        (title_id.empty() || title_id.compare(0, cusa.size(), cusa) != 0))
-                        continue;
 
-                    // Prefer a containing game folder, then a sibling in the
-                    // same directory. This also handles layouts where the
-                    // base game and its DLC PKGs are stored side by side.
-                    std::size_t score = 1;
-                    if (package.entry.compare(0, candidate.entry.size(), candidate.entry) == 0 &&
-                        package.entry.size() > candidate.entry.size() &&
-                        package.entry[candidate.entry.size()] == '/')
-                        score = 3;
-                    else
-                    {
-                        const std::size_t candidate_slash = candidate.entry.find_last_of('/');
-                        const std::string candidate_parent = candidate_slash == std::string::npos
-                            ? std::string() : candidate.entry.substr(0, candidate_slash);
-                        if (candidate_parent == package_parent)
-                            score = 2;
-                    }
-                    if (score > best_score)
-                    {
-                        parent = &candidate;
-                        best_score = score;
-                    }
+                const std::string title_id = lowered(candidate.title_id);
+                const bool title_id_match =
+                    !title_id.empty() && title_id.compare(0, cusa.size(), cusa) == 0;
+                const bool path_id_match = cusa_from(candidate.entry) == cusa;
+                if (!title_id_match && !path_id_match)
+                    continue;
+
+                // Find a usable cover before considering this candidate.
+                std::string cover;
+                const auto fresh = fresh_covers.find(candidate.entry);
+                if (fresh != fresh_covers.end())
+                    cover = fresh->second;
+                else
+                {
+                    auto cached = parent_cover_cache.find(candidate.entry);
+                    if (cached != parent_cover_cache.end())
+                        cover = cached->second;
+                    else if (load_picture(cover_path(candidate.entry), &cover, kMaxIcon))
+                        parent_cover_cache.emplace(candidate.entry, cover);
+                }
+                if (cover.empty())
+                    continue;
+
+                int score = title_id_match ? 4 : 1;
+                if (package.entry.compare(0, candidate.entry.size(), candidate.entry) == 0 &&
+                    package.entry.size() > candidate.entry.size() &&
+                    package.entry[candidate.entry.size()] == '/')
+                    score += 3; // game folder contains this package
+                else
+                {
+                    const std::size_t candidate_slash = candidate.entry.find_last_of('/');
+                    const std::string candidate_parent = candidate_slash == std::string::npos
+                        ? std::string() : candidate.entry.substr(0, candidate_slash);
+                    if (candidate_parent == package_parent)
+                        score += 2; // base game and DLC are siblings
+                }
+
+                if (score > best_score)
+                {
+                    best_score = score;
+                    best_parent = &candidate;
+                    best_cover = std::move(cover);
                 }
             }
-            if (parent == nullptr)
-                continue;
-            std::string cover;
-            const auto fresh = fresh_covers.find(parent->entry);
-            if (fresh != fresh_covers.end())
-                cover = fresh->second;
-            else if (!parent->cover_saved ||
-                     !load_picture(cover_path(parent->entry), &cover, kMaxIcon))
-                continue;
-            if (!cover.empty() && save_picture(cover_path(package.entry), cover))
+
+            if (best_parent != nullptr && !best_cover.empty() &&
+                save_picture(cover_path(package.entry), best_cover))
             {
                 package.cover_saved = true;
-                fresh_covers[package.entry] = std::move(cover);
+                fresh_covers[package.entry] = std::move(best_cover);
             }
         }
 
