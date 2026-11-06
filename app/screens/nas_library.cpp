@@ -1159,31 +1159,6 @@ struct LibraryLoader::Job
         std::size_t accepted_folders = 0;
         std::map<std::string, std::string> fresh_covers; // entry -> cover bytes
 
-        // In this NAS layout each game folder contains its base game PKG and
-        // sometimes an update, while DLC packages live below an "ALL DLC"
-        // subfolder. Select only the largest direct-child PKG as the likely
-        // base game; never inspect the smaller update/DLC packages here.
-        std::map<std::string, const DavEntry *> base_pkg_by_folder;
-        for (const DavEntry &candidate : candidates)
-        {
-            if (candidate.folder || !is_pkg(candidate.name))
-                continue;
-            const std::string relative =
-                candidate.path.compare(0, root.size(), root) == 0
-                    ? candidate.path.substr(root.size())
-                    : candidate.name;
-            const std::size_t slash = relative.find_last_of('/');
-            if (slash == std::string::npos || slash == 0)
-                continue; // root-level packages retain their existing handling
-            const std::string parent = relative.substr(0, slash);
-            if (lowered(parent.substr(parent.find_last_of('/') == std::string::npos
-                    ? 0 : parent.find_last_of('/') + 1)) == "all dlc")
-                continue;
-            auto found = base_pkg_by_folder.find(parent);
-            if (found == base_pkg_by_folder.end() || candidate.size > found->second->size)
-                base_pkg_by_folder[parent] = &candidate;
-        }
-        std::map<std::string, std::string> base_pkg_covers;
         const int total = static_cast<int>(candidates.size());
         for (int k = 0; k < total; ++k)
         {
@@ -1288,17 +1263,7 @@ struct LibraryLoader::Job
                 // embedded covers for packages directly in the configured
                 // root. Folder games and root-level PKGs retain their covers.
                 const bool nested_pkg = relative_entry.find('/') != std::string::npos;
-                bool selected_base_pkg = false;
                 if (nested_pkg)
-                {
-                    const std::size_t slash = relative_entry.find_last_of('/');
-                    const std::string parent = relative_entry.substr(0, slash);
-                    const auto selected = base_pkg_by_folder.find(parent);
-                    selected_base_pkg = selected != base_pkg_by_folder.end() &&
-                                         selected->second->path == entry.path;
-                }
-                const bool inspect_cover = !nested_pkg || selected_base_pkg;
-                if (!inspect_cover)
                 {
                     game.cover_saved = false;
                     if (game.note.empty())
@@ -1311,11 +1276,7 @@ struct LibraryLoader::Job
                         std::string cover;
                         game.cover_saved = false;
                         if (fetch_pkg_cover(root, entry, &game, &cover) && !cover.empty())
-                        {
-                            fresh_covers[game.entry] = cover;
-                            if (nested_pkg)
-                                base_pkg_covers[relative_entry] = std::move(cover);
-                        }
+                            fresh_covers[game.entry] = std::move(cover);
                     }
                 }
             }
@@ -1334,55 +1295,6 @@ struct LibraryLoader::Job
             }
             games.push_back(std::move(game));
         }
-        // Include previously cached covers for unchanged base-game PKGs.
-        for (const auto &[folder, base_entry] : base_pkg_by_folder)
-        {
-            if (base_entry == nullptr)
-                continue;
-            const std::string relative =
-                base_entry->path.compare(0, root.size(), root) == 0
-                    ? base_entry->path.substr(root.size())
-                    : base_entry->name;
-            if (base_pkg_covers.find(relative) != base_pkg_covers.end())
-                continue;
-            std::string cover;
-            if (load_picture(cover_path(relative), &cover, kMaxIcon) && !cover.empty())
-                base_pkg_covers.emplace(relative, std::move(cover));
-        }
-
-        // Propagate the selected base-game PKG cover to packages below
-        // that game's folder (notably ALL DLC), without opening those PKGs.
-        for (NasGame &package : games)
-        {
-            if (package.image || package.cover_saved ||
-                !ends_with_nocase(package.entry, ".pkg"))
-                continue;
-            const std::size_t slash = package.entry.find_last_of('/');
-            if (slash == std::string::npos)
-                continue;
-            const std::string parent = package.entry.substr(0, slash);
-            const std::string parent_name = lowered(parent.substr(
-                parent.find_last_of('/') == std::string::npos
-                    ? 0 : parent.find_last_of('/') + 1));
-            if (parent_name != "all dlc")
-                continue;
-            const std::size_t game_slash = parent.find_last_of('/');
-            if (game_slash == std::string::npos)
-                continue;
-            const std::string game_folder = parent.substr(0, game_slash);
-            const std::string base_prefix = game_folder + "/";
-            for (const auto &[base_entry, cover] : base_pkg_covers)
-            {
-                if (base_entry.compare(0, base_prefix.size(), base_prefix) == 0 &&
-                    !cover.empty() && save_picture(cover_path(package.entry), cover))
-                {
-                    package.cover_saved = true;
-                    fresh_covers[package.entry] = cover;
-                    break;
-                }
-            }
-        }
-
         // Reuse a real game cover for DLC/updates with the same CUSA.
         // Only select candidates whose cover bytes are actually available; a
         // matching titleId without a saved/fresh cover must not stop the search.
