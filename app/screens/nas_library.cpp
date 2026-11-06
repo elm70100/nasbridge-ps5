@@ -1176,8 +1176,6 @@ struct LibraryLoader::Job
             if (slash == std::string::npos || slash == 0)
                 continue; // root-level packages retain their existing handling
             const std::string parent = relative.substr(0, slash);
-            const std::string parent_parent = parent.substr(0, parent.find_last_of('/') == std::string::npos
-                ? parent.size() : parent.find_last_of('/'));
             if (lowered(parent.substr(parent.find_last_of('/') == std::string::npos
                     ? 0 : parent.find_last_of('/') + 1)) == "all dlc")
                 continue;
@@ -1336,6 +1334,22 @@ struct LibraryLoader::Job
             }
             games.push_back(std::move(game));
         }
+        // Include previously cached covers for unchanged base-game PKGs.
+        for (const auto &[folder, base_entry] : base_pkg_by_folder)
+        {
+            if (base_entry == nullptr)
+                continue;
+            const std::string relative =
+                base_entry->path.compare(0, root.size(), root) == 0
+                    ? base_entry->path.substr(root.size())
+                    : base_entry->name;
+            if (base_pkg_covers.find(relative) != base_pkg_covers.end())
+                continue;
+            std::string cover;
+            if (load_picture(cover_path(relative), &cover, kMaxIcon) && !cover.empty())
+                base_pkg_covers.emplace(relative, std::move(cover));
+        }
+
         // Propagate the selected base-game PKG cover to packages below
         // that game's folder (notably ALL DLC), without opening those PKGs.
         for (NasGame &package : games)
