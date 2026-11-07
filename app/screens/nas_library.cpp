@@ -784,15 +784,17 @@ struct LibraryLoader::Job
             return false;
         }
         const auto *c = reinterpret_cast<const std::uint8_t *>(ch.data());
-        const std::uint32_t count = be32(c + 0x10);
         const std::uint32_t table_off = be32(c + 0x18);
-        if (!count || count > 2048 || table_off > 0x200000 ||
-            static_cast<std::uint64_t>(count) * 32 > entry.size - cnt ||
-            table_off > entry.size - cnt - static_cast<std::uint64_t>(count) * 32) {
+        const std::uint32_t table_bytes = be32(c + 0x1c);
+        if (!table_bytes || (table_bytes % 32) != 0 || table_bytes / 32 > 2048 ||
+            table_off > 0x200000 || table_bytes > entry.size - cnt ||
+            table_off > entry.size - cnt - table_bytes) {
             game->note = "invalid PKG entry table";
             return false;
         }
-        const std::size_t table_size = static_cast<std::size_t>(count) * 32;
+        // CNT stores the table's byte length at 0x1c, not an entry count at 0x10.
+        const std::uint32_t count = table_bytes / 32;
+        const std::size_t table_size = table_bytes;
         std::string table;
         if (!read(cnt + table_off, table_size, &table)) {
             game->note = "PKG entry table could not be read";
@@ -1263,11 +1265,12 @@ struct LibraryLoader::Job
                 // embedded covers for packages directly in the configured
                 // root. Folder games and root-level PKGs retain their covers.
                 const bool nested_pkg = relative_entry.find('/') != std::string::npos;
-                if (nested_pkg)
+                const bool named_ps4_pkg = lowered(entry.name).find("cusa") != std::string::npos;
+                if (nested_pkg && !named_ps4_pkg)
                 {
                     game.cover_saved = false;
                     if (game.note.empty())
-                        game.note = "Nested PKG listed; embedded cover check skipped for stability.";
+                        game.note = "Nested non-PS4 PKG cover check skipped for stability.";
                 }
                 else
                 {
@@ -1330,8 +1333,7 @@ struct LibraryLoader::Job
 
             for (const NasGame &candidate : games)
             {
-                if (candidate.entry == package.entry || candidate.image ||
-                    ends_with_nocase(candidate.entry, ".pkg"))
+                if (candidate.entry == package.entry || candidate.image)
                     continue;
 
                 const std::string title_id = lowered(candidate.title_id);
@@ -1369,6 +1371,11 @@ struct LibraryLoader::Job
                         ? std::string() : candidate.entry.substr(0, candidate_slash);
                     if (candidate_parent == package_parent)
                         score += 2; // base game and DLC are siblings
+                    else if (!candidate_parent.empty() &&
+                             package.entry.compare(0, candidate_parent.size(), candidate_parent) == 0 &&
+                             package.entry.size() > candidate_parent.size() &&
+                             package.entry[candidate_parent.size()] == '/')
+                        score += 3; // base PKG is in an ancestor game folder
                 }
 
                 if (score > best_score)
