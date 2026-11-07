@@ -1265,12 +1265,11 @@ struct LibraryLoader::Job
                 // embedded covers for packages directly in the configured
                 // root. Folder games and root-level PKGs retain their covers.
                 const bool nested_pkg = relative_entry.find('/') != std::string::npos;
-                const bool named_ps4_pkg = lowered(entry.name).find("cusa") != std::string::npos;
-                if (nested_pkg && !named_ps4_pkg)
+                if (nested_pkg)
                 {
                     game.cover_saved = false;
                     if (game.note.empty())
-                        game.note = "Nested non-PS4 PKG cover check skipped for stability.";
+                        game.note = "Nested PKG listed; embedded cover check skipped for stability.";
                 }
                 else
                 {
