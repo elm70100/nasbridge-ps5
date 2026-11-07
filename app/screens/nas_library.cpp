@@ -1267,9 +1267,39 @@ struct LibraryLoader::Job
                 const bool nested_pkg = relative_entry.find('/') != std::string::npos;
                 if (nested_pkg)
                 {
+                    // PS4 package entries discovered by the root scan can reuse
+                    // the already-cached cover of their nearest containing game
+                    // folder. Do not read the nested PKG: that path was disabled
+                    // after a PS5 SIGILL. Keep this inheritance limited to a
+                    // PS4 library so the PS5 path remains unchanged.
                     game.cover_saved = false;
-                    if (game.note.empty())
+                    const std::string configured = lowered(connection.folder);
+                    const std::string relative = lowered(relative_entry);
+                    const bool ps4_library =
+                        configured.find("ps4") != std::string::npos ||
+                        relative.find("ps4/") != std::string::npos;
+                    if (ps4_library)
+                    {
+                        std::string parent = relative_entry;
+                        std::size_t slash = parent.find_last_of('/');
+                        while (slash != std::string::npos)
+                        {
+                            parent.resize(slash);
+                            std::string inherited;
+                            if (load_picture(cover_path(parent), &inherited, kMaxIcon) &&
+                                save_picture(cover_path(game.entry), inherited))
+                            {
+                                game.cover_saved = true;
+                                fresh_covers[game.entry] = std::move(inherited);
+                                break;
+                            }
+                            slash = parent.find_last_of('/');
+                        }
+                    }
+                    if (!game.cover_saved && game.note.empty())
                         game.note = "Nested PKG listed; embedded cover check skipped for stability.";
+                    else if (game.cover_saved)
+                        game.note.clear();
                 }
                 else
                 {
