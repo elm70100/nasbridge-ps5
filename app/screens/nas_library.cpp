@@ -1302,14 +1302,33 @@ struct LibraryLoader::Job
         // matching titleId without a saved/fresh cover must not stop the search.
         auto cusa_from = [](const std::string &value) -> std::string
         {
-            const std::string low = lowered(value);
-            const std::size_t at = low.find("cusa");
-            if (at == std::string::npos || at + 9 > low.size())
+            // Prefer the package/folder name over its parent path. A container
+            // directory can carry a different CUSA (e.g. CUSA00242) from the
+            // actual base game and DLC packages inside it (CUSA00433).
+            auto find_cusa = [](const std::string &text) -> std::string
+            {
+                const std::string low = lowered(text);
+                std::size_t at = low.find("cusa");
+                while (at != std::string::npos)
+                {
+                    if (at + 9 <= low.size())
+                    {
+                        bool digits = true;
+                        for (std::size_t i = at + 4; i < at + 9; ++i)
+                            digits = digits && low[i] >= '0' && low[i] <= '9';
+                        if (digits)
+                            return low.substr(at, 9);
+                    }
+                    at = low.find("cusa", at + 4);
+                }
                 return {};
-            for (std::size_t i = at + 4; i < at + 9; ++i)
-                if (low[i] < '0' || low[i] > '9')
-                    return {};
-            return low.substr(at, 9);
+            };
+
+            const std::size_t slash = value.find_last_of('/');
+            const std::string basename = slash == std::string::npos
+                ? value : value.substr(slash + 1);
+            const std::string own_id = find_cusa(basename);
+            return own_id.empty() ? find_cusa(value) : own_id;
         };
         std::map<std::string, std::string> parent_cover_cache;
         for (NasGame &package : games)
