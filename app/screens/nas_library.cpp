@@ -1369,9 +1369,6 @@ struct LibraryLoader::Job
                 !ends_with_nocase(package.entry, ".pkg"))
                 continue;
             const std::string cusa = cusa_from(package.entry);
-            if (cusa.empty())
-                continue;
-
             const std::size_t package_slash = package.entry.find_last_of('/');
             const std::string package_parent = package_slash == std::string::npos
                 ? std::string() : package.entry.substr(0, package_slash);
@@ -1385,10 +1382,17 @@ struct LibraryLoader::Job
                     continue;
 
                 const std::string title_id = lowered(candidate.title_id);
-                const bool title_id_match =
+                const bool title_id_match = !cusa.empty() &&
                     !title_id.empty() && title_id.compare(0, cusa.size(), cusa) == 0;
-                const bool path_id_match = cusa_from(candidate.entry) == cusa;
-                if (!title_id_match && !path_id_match)
+                const bool path_id_match = !cusa.empty() && cusa_from(candidate.entry) == cusa;
+                const bool contains_package =
+                    package.entry.compare(0, candidate.entry.size(), candidate.entry) == 0 &&
+                    package.entry.size() > candidate.entry.size() &&
+                    package.entry[candidate.entry.size()] == '/';
+                // A container folder can have a different CUSA from the PKGs
+                // inside it. Keep it as a fallback when it physically contains
+                // the package, even if the IDs do not match.
+                if (!title_id_match && !path_id_match && !contains_package)
                     continue;
 
                 // Find a usable cover before considering this candidate.
@@ -1431,6 +1435,41 @@ struct LibraryLoader::Job
                     best_score = score;
                     best_parent = &candidate;
                     best_cover = std::move(cover);
+                }
+            }
+
+            if (best_parent == nullptr)
+            {
+                // Prefer the nearest containing folder's already-known cover.
+                // This handles collections whose folder CUSA differs from the
+                // base/update/DLC package CUSA (for example Diablo III).
+                std::size_t best_depth = 0;
+                for (const NasGame &candidate : games)
+                {
+                    if (candidate.image || candidate.entry == package.entry ||
+                        package.entry.size() <= candidate.entry.size() ||
+                        package.entry.compare(0, candidate.entry.size(), candidate.entry) != 0 ||
+                        package.entry[candidate.entry.size()] != '/')
+                        continue;
+
+                    std::string cover;
+                    const auto fresh = fresh_covers.find(candidate.entry);
+                    if (fresh != fresh_covers.end())
+                        cover = fresh->second;
+                    else if (!load_picture(cover_path(candidate.entry), &cover, kMaxIcon))
+                        continue;
+                    if (cover.empty())
+                        continue;
+
+                    const std::size_t depth =
+                        static_cast<std::size_t>(std::count(candidate.entry.begin(),
+                                                             candidate.entry.end(), '/'));
+                    if (best_parent == nullptr || depth > best_depth)
+                    {
+                        best_parent = &candidate;
+                        best_cover = std::move(cover);
+                        best_depth = depth;
+                    }
                 }
             }
 
