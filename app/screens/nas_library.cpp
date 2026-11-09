@@ -1295,6 +1295,26 @@ struct LibraryLoader::Job
                             }
                             slash = parent.find_last_of('/');
                         }
+
+                        // A package scanned from inside its own folder is
+                        // cached under its basename. When the same package is
+                        // discovered by the root scan, its entry includes the
+                        // parent path, so also check the basename key. This
+                        // reuses the already-extracted PS4 cover without
+                        // reading the nested PKG again.
+                        if (!game.cover_saved)
+                        {
+                            const std::size_t name_slash = relative_entry.find_last_of('/');
+                            const std::string basename = name_slash == std::string::npos
+                                ? relative_entry : relative_entry.substr(name_slash + 1);
+                            std::string cached;
+                            if (load_picture(cover_path(basename), &cached, kMaxIcon) &&
+                                save_picture(cover_path(game.entry), cached))
+                            {
+                                game.cover_saved = true;
+                                fresh_covers[game.entry] = std::move(cached);
+                            }
+                        }
                     }
                     if (!game.cover_saved && game.note.empty())
                         game.note = "Nested PKG listed; embedded cover check skipped for stability.";
