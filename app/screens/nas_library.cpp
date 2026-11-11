@@ -1160,6 +1160,12 @@ struct LibraryLoader::Job
         std::size_t rejected_folders = 0;
         std::size_t accepted_folders = 0;
         std::map<std::string, std::string> fresh_covers; // entry -> cover bytes
+        std::size_t nested_pkg_count = 0;
+        std::size_t ps4_nested_pkg_count = 0;
+        std::size_t parent_cache_hits = 0;
+        std::size_t basename_cache_hits = 0;
+        std::size_t nested_without_cover = 0;
+        std::size_t cusa_inherited_covers = 0;
 
         const int total = static_cast<int>(candidates.size());
         for (int k = 0; k < total; ++k)
@@ -1267,6 +1273,7 @@ struct LibraryLoader::Job
                 const bool nested_pkg = relative_entry.find('/') != std::string::npos;
                 if (nested_pkg)
                 {
+                    ++nested_pkg_count;
                     // PS4 package entries discovered by the root scan can reuse
                     // the already-cached cover of their nearest containing game
                     // folder. Do not read the nested PKG: that path was disabled
@@ -1280,6 +1287,7 @@ struct LibraryLoader::Job
                         relative.find("ps4/") != std::string::npos;
                     if (ps4_library)
                     {
+                        ++ps4_nested_pkg_count;
                         std::string parent = relative_entry;
                         std::size_t slash = parent.find_last_of('/');
                         while (slash != std::string::npos)
@@ -1290,6 +1298,7 @@ struct LibraryLoader::Job
                                 save_picture(cover_path(game.entry), inherited))
                             {
                                 game.cover_saved = true;
+                                ++parent_cache_hits;
                                 fresh_covers[game.entry] = std::move(inherited);
                                 break;
                             }
@@ -1312,10 +1321,13 @@ struct LibraryLoader::Job
                                 save_picture(cover_path(game.entry), cached))
                             {
                                 game.cover_saved = true;
+                                ++basename_cache_hits;
                                 fresh_covers[game.entry] = std::move(cached);
                             }
                         }
                     }
+                    if (!game.cover_saved)
+                        ++nested_without_cover;
                     if (!game.cover_saved && game.note.empty())
                         game.note = "Nested PKG listed; embedded cover check skipped for stability.";
                     else if (game.cover_saved)
@@ -1497,6 +1509,7 @@ struct LibraryLoader::Job
                 save_picture(cover_path(package.entry), best_cover))
             {
                 package.cover_saved = true;
+                ++cusa_inherited_covers;
                 fresh_covers[package.entry] = std::move(best_cover);
             }
         }
@@ -1506,6 +1519,12 @@ struct LibraryLoader::Job
                  std::to_string(root_folder_count) + " root folders; " +
                  std::to_string(walked) + " subfolders checked; " +
                  std::to_string(discovered_nested_pkgs) + " nested PKGs; " +
+                 std::to_string(nested_pkg_count) + " nested checked; " +
+                 std::to_string(ps4_nested_pkg_count) + " PS4 nested; " +
+                 std::to_string(parent_cache_hits) + " parent-cache hits; " +
+                 std::to_string(basename_cache_hits) + " filename-cache hits; " +
+                 std::to_string(cusa_inherited_covers) + " CUSA covers; " +
+                 std::to_string(nested_without_cover) + " nested without cover; " +
                  std::to_string(accepted_folders) + " game folders accepted; " +
                  std::to_string(rejected_folders) + " folders rejected; " +
                  std::to_string(games.size()) + " items");
